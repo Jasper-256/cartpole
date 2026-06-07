@@ -1,7 +1,9 @@
 # Multi-Pendulum CartPole with PufferLib
 
 This is a small, trainable cartpole setup where one cart balances a configurable
-number of inverted pendulums. The default pendulum count lives in one place:
+serial chain of equal-length pendulums. `--num-pendulums 2` means a double
+pendulum attached end-to-end, not two independent pendulums mounted on the cart.
+The default pendulum count lives in one place:
 
 ```python
 # cartpole_multi/config.py
@@ -11,6 +13,9 @@ NUM_PENDULUMS = 1
 The environment is a flat `gymnasium.Env` with a `Discrete(3)` action space and
 `Box` observations, then wrapped with `pufferlib.emulation.GymnasiumPufferEnv`
 and vectorized through `pufferlib.vector.make`.
+
+Episodes reset with the chain hanging downward, which is the natural resting
+state. The stabilization target is still upright.
 
 ## Setup
 
@@ -46,7 +51,7 @@ it when training finishes. Use `--no-open-video` to save without opening, or
 python -m cartpole_multi.train --num-pendulums 2 --total-timesteps 2048 --no-open-video
 ```
 
-Training logs include a stabilization metric:
+Training logs include an upright stabilization metric:
 
 - `stable_steps`: count of env-timesteps where the cart is near center and all
   pendulums are upright and slow.

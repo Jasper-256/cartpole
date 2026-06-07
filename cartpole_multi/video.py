@@ -42,22 +42,19 @@ def record_policy_video(torch_model, obs_dim: int, args: argparse.Namespace) -> 
 
 def render_env_frame(env: MultiPendulumCartPoleEnv, width: int = 800, height: int = 450) -> np.ndarray:
     p = env.params
-    frame = Image.new("RGB", (width, height), (248, 249, 251))
+    frame = Image.new("RGB", (width, height), (5, 7, 10))
     draw = ImageDraw.Draw(frame)
 
-    track_y = int(height * 0.68)
+    track_y = int(height * 0.55)
     margin = 72
     world_width = 2 * p.x_threshold
     px_per_meter = (width - 2 * margin) / world_width
     cart_x = int(width / 2 + float(env.state[0]) * px_per_meter)
     cart_w = 70
     cart_h = 34
-    pivot_y = track_y - cart_h // 2
+    pivot_y = track_y - cart_h
 
-    draw.line((margin, track_y, width - margin, track_y), fill=(44, 51, 63), width=3)
-    stable_left = int(width / 2 - p.stable_x_threshold * px_per_meter)
-    stable_right = int(width / 2 + p.stable_x_threshold * px_per_meter)
-    draw.rectangle((stable_left, track_y + 8, stable_right, track_y + 15), fill=(109, 184, 138))
+    draw.line((margin, track_y, width - margin, track_y), fill=(82, 92, 108), width=2)
 
     cart_box = (
         cart_x - cart_w // 2,
@@ -65,32 +62,31 @@ def render_env_frame(env: MultiPendulumCartPoleEnv, width: int = 800, height: in
         cart_x + cart_w // 2,
         track_y,
     )
-    draw.rounded_rectangle(cart_box, radius=6, fill=(45, 91, 145), outline=(23, 48, 77), width=2)
-    draw.ellipse((cart_x - 28, track_y - 4, cart_x - 12, track_y + 12), fill=(38, 38, 38))
-    draw.ellipse((cart_x + 12, track_y - 4, cart_x + 28, track_y + 12), fill=(38, 38, 38))
+    draw.rectangle(cart_box, fill=(30, 41, 59), outline=(190, 203, 220), width=2)
 
     theta = env.state[2 : 2 + env.num_pendulums]
     colors = [
-        (222, 91, 73),
-        (54, 137, 121),
-        (132, 91, 184),
-        (214, 151, 58),
-        (66, 121, 196),
+        (244, 114, 182),
+        (45, 212, 191),
+        (129, 140, 248),
+        (251, 191, 36),
+        (96, 165, 250),
     ]
-    pole_len_px = int(150 * min(1.0, 1.4 / max(env.num_pendulums, 1)))
-    pivot_offsets = np.linspace(-12, 12, env.num_pendulums) if env.num_pendulums > 1 else [0]
-    for idx, (angle, offset) in enumerate(zip(theta, pivot_offsets)):
-        pivot_x = int(cart_x + offset)
+    pole_len_px = int(min(125, max(34, (height - 96) / (2 * env.num_pendulums))))
+    pivot_x = cart_x
+    for idx, angle in enumerate(theta):
         tip_x = int(pivot_x + pole_len_px * np.sin(float(angle)))
         tip_y = int(pivot_y - pole_len_px * np.cos(float(angle)))
         color = colors[idx % len(colors)]
         draw.line((pivot_x, pivot_y, tip_x, tip_y), fill=color, width=6)
-        draw.ellipse((pivot_x - 5, pivot_y - 5, pivot_x + 5, pivot_y + 5), fill=(24, 31, 42))
+        draw.ellipse((pivot_x - 5, pivot_y - 5, pivot_x + 5, pivot_y + 5), fill=(226, 232, 240))
         draw.ellipse((tip_x - 9, tip_y - 9, tip_x + 9, tip_y + 9), fill=color)
+        pivot_x = tip_x
+        pivot_y = tip_y
 
     stable_text = "stable" if env.is_stable() else "unstable"
-    draw.text((18, 16), f"step {env.step_count}  {stable_text}", fill=(24, 31, 42))
-    draw.text((18, 38), f"x={float(env.state[0]):+.2f}", fill=(24, 31, 42))
+    draw.text((18, 16), f"step {env.step_count}  upright {stable_text}", fill=(226, 232, 240))
+    draw.text((18, 38), f"x={float(env.state[0]):+.2f}", fill=(148, 163, 184))
     return np.asarray(frame, dtype=np.uint8)
 
 
