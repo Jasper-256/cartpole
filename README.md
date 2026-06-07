@@ -21,10 +21,10 @@ state. The stabilization target is still upright.
 
 ## Setup
 
-Python 3.12 is recommended.
+Python 3.12 is recommended. Use the `python` and `pip` commands directly as they use python 3.12.
 
 ```bash
-python3.12 -m venv .venv
+python -m venv .venv
 . .venv/bin/activate
 python -m pip install -e .
 ```
