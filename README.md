@@ -22,19 +22,33 @@ python3.12 -m venv .venv
 python -m pip install -e .
 ```
 
-## Smoke Runs
+## Quick Smoke Runs
 
-Run short PPO smoke trainings for one and two pendulums:
+Use the main trainer with a small timestep budget to check that the environment,
+PufferLib wrapper, and PPO loop are working:
 
 ```bash
-python -m cartpole_multi.smoke
+python -m cartpole_multi.train --num-pendulums 1 --total-timesteps 1024
+python -m cartpole_multi.train --num-pendulums 2 --total-timesteps 1024
 ```
 
-Or run one configuration directly:
+For a slightly longer two-pendulum check:
 
 ```bash
 python -m cartpole_multi.train --num-pendulums 2 --total-timesteps 2048
 ```
 
+Training logs include a stabilization metric:
+
+- `stable_steps`: count of env-timesteps where the cart is near center and all
+  pendulums are upright and slow.
+- `stable_rate`: `stable_steps / steps`.
+- `recent_stable_rate`: same ratio over the recent rollout window.
+
+By default a timestep is stable when `|x| <= 0.5`, every `|theta| <= 12 deg`
+(`0.20944 rad`), and every `|theta_dot| <= 1.0` radians/sec. You can tune those with
+`--stable-x-threshold`, `--stable-theta-threshold`, and
+`--stable-theta-dot-threshold`.
+
 Use `--backend multiprocessing --num-workers 4 --num-envs 64` for a faster
-CPU-vectorized run once the basic serial smoke path is working.
+CPU-vectorized run once the basic serial quick run is working.

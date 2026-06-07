@@ -21,6 +21,9 @@ class CartPoleParams:
     pole_friction: float = 0.015
     x_threshold: float = 2.4
     theta_threshold: float = 1.25
+    stable_x_threshold: float = 0.5
+    stable_theta_threshold: float = np.deg2rad(12.0)
+    stable_theta_dot_threshold: float = 1.0
     max_episode_steps: int = 500
 
 
@@ -129,6 +132,7 @@ class MultiPendulumCartPoleEnv(gym.Env):
         info = {
             "x": x,
             "upright": float(np.mean(np.cos(theta))),
+            "stable": self._is_stable(),
             "num_pendulums": self.num_pendulums,
         }
         return self._get_obs(), reward, terminated, truncated, info
@@ -152,3 +156,13 @@ class MultiPendulumCartPoleEnv(gym.Env):
     def _get_obs(self) -> np.ndarray:
         return self.state.astype(np.float32, copy=True)
 
+    def _is_stable(self) -> bool:
+        p = self.params
+        x = float(self.state[0])
+        theta = self.state[2 : 2 + self.num_pendulums]
+        theta_dot = self.state[2 + self.num_pendulums :]
+        return bool(
+            abs(x) <= p.stable_x_threshold
+            and np.all(np.abs(theta) <= p.stable_theta_threshold)
+            and np.all(np.abs(theta_dot) <= p.stable_theta_dot_threshold)
+        )

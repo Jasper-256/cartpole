@@ -21,6 +21,8 @@ class TrainResult:
     steps_per_second: float
     last_mean_reward: float
     last_mean_length: float
+    stable_timesteps: int
+    stable_rate: float
 
 
 class ActorCritic(nn.Module):
@@ -86,10 +88,14 @@ def train(args: argparse.Namespace) -> TrainResult:
     episode_lengths = np.zeros(args.num_envs, dtype=np.int32)
     recent_returns: list[float] = []
     recent_lengths: list[int] = []
+    stable_timesteps = 0
+    recent_stable_timesteps = 0
+    recent_total_timesteps = 0
     start = time.time()
     global_step = 0
 
     for update in range(1, updates + 1):
+        update_stable_timesteps = 0
         for step in range(args.rollout_steps):
             global_step += args.num_envs
             obs_tensor = torch.as_tensor(obs.reshape(args.num_envs, obs_dim), device=device)
@@ -108,6 +114,16 @@ def train(args: argparse.Namespace) -> TrainResult:
 
             episode_returns += np.asarray(reward, dtype=np.float32)
             episode_lengths += 1
+            stable_mask = stable_observations(
+                np.asarray(next_obs, dtype=np.float32),
+                args.num_pendulums,
+                args.stable_x_threshold,
+                args.stable_theta_threshold,
+                args.stable_theta_dot_threshold,
+            )
+            stable_count = int(np.sum(stable_mask))
+            stable_timesteps += stable_count
+            update_stable_timesteps += stable_count
             for idx in np.flatnonzero(done):
                 recent_returns.append(float(episode_returns[idx]))
                 recent_lengths.append(int(episode_lengths[idx]))
@@ -182,15 +198,25 @@ def train(args: argparse.Namespace) -> TrainResult:
                 nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
                 optimizer.step()
 
+        recent_stable_timesteps += update_stable_timesteps
+        recent_total_timesteps += rollout_size
+        if recent_total_timesteps > args.stable_window_timesteps:
+            recent_stable_timesteps = update_stable_timesteps
+            recent_total_timesteps = rollout_size
+
         if args.log_every and update % args.log_every == 0:
             elapsed = max(time.time() - start, 1e-9)
             sps = int(global_step / elapsed)
             mean_reward = float(np.mean(recent_returns)) if recent_returns else 0.0
             mean_length = float(np.mean(recent_lengths)) if recent_lengths else 0.0
+            stable_rate = stable_timesteps / max(global_step, 1)
+            recent_stable_rate = recent_stable_timesteps / max(recent_total_timesteps, 1)
             print(
                 f"update={update}/{updates} pendulums={args.num_pendulums} "
                 f"steps={global_step} sps={sps} "
-                f"mean_return={mean_reward:.2f} mean_len={mean_length:.1f}"
+                f"mean_return={mean_reward:.2f} mean_len={mean_length:.1f} "
+                f"stable_steps={stable_timesteps} stable_rate={stable_rate:.3f} "
+                f"recent_stable_rate={recent_stable_rate:.3f}"
             )
 
     close = getattr(envs, "close", None)
@@ -205,6 +231,25 @@ def train(args: argparse.Namespace) -> TrainResult:
         steps_per_second=global_step / elapsed,
         last_mean_reward=float(np.mean(recent_returns)) if recent_returns else 0.0,
         last_mean_length=float(np.mean(recent_lengths)) if recent_lengths else 0.0,
+        stable_timesteps=stable_timesteps,
+        stable_rate=stable_timesteps / max(global_step, 1),
+    )
+
+
+def stable_observations(
+    obs: np.ndarray,
+    num_pendulums: int,
+    x_threshold: float,
+    theta_threshold: float,
+    theta_dot_threshold: float,
+) -> np.ndarray:
+    x = obs[:, 0]
+    theta = obs[:, 2 : 2 + num_pendulums]
+    theta_dot = obs[:, 2 + num_pendulums :]
+    return (
+        (np.abs(x) <= x_threshold)
+        & np.all(np.abs(theta) <= theta_threshold, axis=1)
+        & np.all(np.abs(theta_dot) <= theta_dot_threshold, axis=1)
     )
 
 
@@ -228,6 +273,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--log-every", type=int, default=1)
+    parser.add_argument("--stable-x-threshold", type=float, default=0.5)
+    parser.add_argument("--stable-theta-threshold", type=float, default=float(np.deg2rad(12.0)))
+    parser.add_argument("--stable-theta-dot-threshold", type=float, default=1.0)
+    parser.add_argument("--stable-window-timesteps", type=int, default=4096)
     return parser.parse_args()
 
 
@@ -240,10 +289,11 @@ def main() -> None:
         f"updates={result.updates} "
         f"sps={result.steps_per_second:.0f} "
         f"mean_return={result.last_mean_reward:.2f} "
-        f"mean_len={result.last_mean_length:.1f}"
+        f"mean_len={result.last_mean_length:.1f} "
+        f"stable_steps={result.stable_timesteps} "
+        f"stable_rate={result.stable_rate:.3f}"
     )
 
 
 if __name__ == "__main__":
     main()
-
