@@ -4,54 +4,13 @@ import argparse
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import numpy as np
-import torch
 from PIL import Image, ImageDraw
 
 from cartpole_multi.env import MultiPendulumCartPoleEnv
-from cartpole_multi.observations import encode_observations
-
-
-def record_policy_video(torch_model, obs_dim: int, args: argparse.Namespace) -> str:
-    video_dir = Path(args.video_dir)
-    video_dir.mkdir(parents=True, exist_ok=True)
-    video_path = video_dir / (
-        f"cartpole_{args.num_pendulums}p_{args.total_timesteps}steps_seed{args.seed}.mp4"
-    )
-
-    env = MultiPendulumCartPoleEnv(
-        num_pendulums=args.num_pendulums,
-        reset_mode=args.eval_reset_mode,
-        seed=args.seed + 10_000,
-    )
-    obs, _info = env.reset()
-    frames = [render_env_frame(env, width=args.video_width, height=args.video_height)]
-
-    torch_model.eval()
-    device = next(torch_model.parameters()).device
-    with torch.no_grad():
-        for _step in range(args.video_steps):
-            policy_obs = encode_observations(
-                obs,
-                args.num_pendulums,
-                args.observation_mode,
-            )
-            obs_tensor = torch.as_tensor(
-                policy_obs.reshape(1, obs_dim),
-                dtype=torch.float32,
-                device=device,
-            )
-            logits, _value = torch_model(obs_tensor)
-            action = int(torch.argmax(logits, dim=-1).item())
-            obs, _reward, terminated, truncated, _info = env.step(action)
-            frames.append(render_env_frame(env, width=args.video_width, height=args.video_height))
-            if terminated or truncated:
-                break
-
-    write_video(frames, video_path, fps=args.video_fps)
-    return str(video_path)
 
 
 def record_action_video(
@@ -71,6 +30,7 @@ def record_action_video(
         seed=args.seed,
     )
     _obs, _info = env.reset()
+    render_start = time.perf_counter()
     frames = [render_env_frame(env, width=args.video_width, height=args.video_height)]
 
     for action in actions[: args.video_steps]:
@@ -79,11 +39,28 @@ def record_action_video(
         if terminated or truncated:
             break
 
+    render_elapsed = max(time.perf_counter() - render_start, 1e-9)
+    print(
+        f"timing phase=video_render frames={len(frames)} "
+        f"elapsed={render_elapsed:.3f}s fps={len(frames) / render_elapsed:.0f}",
+        flush=True,
+    )
+    write_start = time.perf_counter()
     write_video(frames, video_path, fps=args.video_fps)
+    write_elapsed = max(time.perf_counter() - write_start, 1e-9)
+    print(
+        f"timing phase=video_write frames={len(frames)} "
+        f"elapsed={write_elapsed:.3f}s fps={len(frames) / write_elapsed:.0f}",
+        flush=True,
+    )
     return str(video_path)
 
 
-def render_env_frame(env: MultiPendulumCartPoleEnv, width: int = 800, height: int = 450) -> np.ndarray:
+def render_env_frame(
+    env: MultiPendulumCartPoleEnv,
+    width: int = 800,
+    height: int = 450,
+) -> np.ndarray:
     p = env.params
     frame = Image.new("RGB", (width, height), (5, 7, 10))
     draw = ImageDraw.Draw(frame)
@@ -171,7 +148,12 @@ def write_video(frames: list[np.ndarray], video_path: Path, fps: int) -> None:
         "yuv420p",
         str(video_path),
     ]
-    process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    process = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
     assert process.stdin is not None
     for frame in frames:
         process.stdin.write(frame.astype(np.uint8, copy=False).tobytes())

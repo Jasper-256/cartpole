@@ -22,6 +22,7 @@ class CartPoleParams:
     x_threshold: float = 2.4
     theta_threshold: float = 1.25
     stable_x_threshold: float = 0.5
+    stable_x_dot_threshold: float = 0.75
     stable_theta_threshold: float = np.deg2rad(12.0)
     stable_theta_dot_threshold: float = 1.0
     max_episode_steps: int = 500
@@ -315,6 +316,7 @@ class MultiPendulumCartPoleEnv(gym.Env):
         theta_dot = self.state[2 + self.num_pendulums :]
         return bool(
             abs(x) <= p.stable_x_threshold
+            and abs(float(self.state[1])) <= p.stable_x_dot_threshold
             and np.all(np.abs(theta) <= p.stable_theta_threshold)
             and np.all(np.abs(theta_dot) <= p.stable_theta_dot_threshold)
         )

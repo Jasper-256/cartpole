@@ -1,27 +1,21 @@
-# Multi-Pendulum CartPole with PufferLib
+# Multi-Pendulum CartPole Trajectory Optimizer
 
-This is a small, trainable cartpole setup where one cart balances a configurable
-serial chain of equal-length pendulums. `--num-pendulums 2` means a double
-pendulum attached end-to-end, not two independent pendulums mounted on the cart.
-The default pendulum count lives in one place:
+This project trains a controller for a cart with a serial chain of equal-length
+pendulums. `--num-pendulums 2` means a double pendulum attached end-to-end, not
+two independent rods mounted on the cart.
 
-```python
-# cartpole_multi/config.py
-NUM_PENDULUMS = 1
-```
-
-The environment is a flat `gymnasium.Env` with a `Discrete(3)` action space and
-`Box` observations. Training defaults to a fast NumPy batched backend, and the
-Gymnasium environment can still be wrapped with
-`pufferlib.emulation.GymnasiumPufferEnv` and vectorized through
-`pufferlib.vector.make` with the `serial` or `multiprocessing` backends.
+The training entrypoint is specialized for the double-pendulum swing-up task. It
+uses a GPU batched trajectory search over compact repeated action segments, then
+evaluates the resulting plan with deterministic local feedback near upright. The hot
+search loop keeps state as separate float32 tensors on the selected device and
+does not materialize repeated action sequences.
 
 Episodes reset with the chain hanging downward, which is the natural resting
-state. The stabilization target is still upright.
+state. The stabilization target is upright.
 
 ## Setup
 
-Python 3.12 is recommended. Use the `python` and `pip` commands directly as they use python 3.12.
+Python 3.12 is recommended.
 
 ```bash
 python -m venv .venv
@@ -29,63 +23,39 @@ python -m venv .venv
 python -m pip install -e .
 ```
 
-## Quick Smoke Runs
+## Run
 
-Use the main trainer to optimize a controller and then record a video:
+Use the main trainer to optimize a trajectory, evaluate the feedback controller,
+and record a video:
 
 ```bash
-python -m cartpole_multi.train --num-pendulums 1
 python -m cartpole_multi.train --num-pendulums 2
 ```
 
-The default optimizer is a generic cross-entropy method (CEM) over the configured
-pendulum count. It is compute-heavy, but it is the path intended for the
-downward swing-up task and still uses the same `train` entrypoint. For a quick
-smoke check, shrink the CEM search and skip video:
+`--device gpu` is the default and requires PyTorch to see CUDA or MPS. For a
+small development smoke run on a machine without visible GPU support:
 
 ```bash
-python -m cartpole_multi.train --num-pendulums 2 --no-video --video-steps 5 \
-  --cem-envs 64 --cem-iterations 1 --cem-segments 4 \
-  --cem-planner-envs 64 --cem-planner-iterations 1 --cem-planner-horizon 4
+python -m cartpole_multi.train --num-pendulums 2 --device cpu --no-video \
+  --trajectory-batch-size 256 --trajectory-iterations 1 \
+  --trajectory-segments 4 --trajectory-action-repeat 2 --video-steps 8
 ```
 
-The PPO loop is still available when you want neural-policy training:
+Each full run saves a post-evaluation video to `videos/` and tries to open it
+when training finishes. Use `--no-open-video` to save without opening, or
+`--no-video` to skip rendering.
 
-```bash
-python -m cartpole_multi.train --optimizer ppo --num-pendulums 2 \
-  --total-timesteps 1000000 --no-video
-```
+## Main Knobs
 
-Use the PufferLib wrapper explicitly when you want to compare it:
+- `--trajectory-batch-size`: number of candidate segment sequences scored per
+  update. Defaults to `131072` on CUDA and `65536` on MPS.
+- `--trajectory-iterations`: number of trajectory search updates.
+- `--trajectory-segments`: number of action segments in the plan.
+- `--trajectory-action-repeat`: simulator steps per action segment.
+- `--feedback-switch-*`: thresholds that switch from plan tracking to local
+  upright feedback.
 
-```bash
-python -m cartpole_multi.train --optimizer ppo --num-pendulums 2 \
-  --backend multiprocessing --num-workers 4 --num-envs 64 --no-video
-```
-
-Each run saves a post-training evaluation video to `videos/` and tries to open
-it when training finishes. Use `--no-open-video` to save without opening, or
-`--no-video` to skip rendering:
-
-```bash
-python -m cartpole_multi.train --num-pendulums 2 --no-open-video
-```
-
-Training logs include an upright stabilization metric:
-
-- `stable_steps`: count of env-timesteps where the cart is near center and all
-  pendulums are upright and slow.
-- `stable_rate`: `stable_steps / steps`.
-- `recent_stable_rate`: same ratio over the recent rollout window.
-
-By default a timestep is stable when `|x| <= 0.5`, every `|theta| <= 12 deg`
-(`0.20944 rad`), and every `|theta_dot| <= 1.0` radians/sec. You can tune those with
-`--stable-x-threshold`, `--stable-theta-threshold`, and
-`--stable-theta-dot-threshold`.
-
-For maximum PPO throughput on this small model, keep `--backend numpy` and use a
-large environment batch such as `--num-envs 1024`.
-
-Training also supports `--reset-mode {downward,upright,uniform,mixed}` and
-`--observation-mode {trig,raw}`. The default policy input uses trig angle
-features so the network does not have to learn across the raw angle wrap.
+Training logs include `stable_steps`, the count of env-timesteps where the cart
+is near center and both pendulums are upright and slow. By default a timestep is
+stable when `|x| <= 0.5`, every `|theta| <= 12 deg`, and every
+`|theta_dot| <= 1.0` radians/sec.
