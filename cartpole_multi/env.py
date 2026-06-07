@@ -25,6 +25,15 @@ class CartPoleParams:
     stable_theta_threshold: float = np.deg2rad(12.0)
     stable_theta_dot_threshold: float = 1.0
     max_episode_steps: int = 500
+    upright_reward_weight: float = 2.0
+    centered_reward_weight: float = 0.05
+    energy_reward_weight: float = 0.75
+    x_velocity_cost_weight: float = 0.01
+    theta_velocity_cost_weight: float = 0.002
+    action_cost_weight: float = 0.0005
+    alive_reward: float = 0.7
+    stable_bonus: float = 5.0
+    termination_penalty: float = 25.0
 
 
 class MultiPendulumCartPoleEnv(gym.Env):
@@ -42,6 +51,7 @@ class MultiPendulumCartPoleEnv(gym.Env):
         self,
         num_pendulums: int = NUM_PENDULUMS,
         params: CartPoleParams | None = None,
+        reset_mode: str = "downward",
         seed: int | None = None,
     ) -> None:
         super().__init__()
@@ -50,6 +60,7 @@ class MultiPendulumCartPoleEnv(gym.Env):
 
         self.num_pendulums = int(num_pendulums)
         self.params = params or CartPoleParams()
+        self.reset_mode = self._validate_reset_mode(reset_mode)
         self.action_space = spaces.Discrete(3)
 
         obs_dim = 2 + 2 * self.num_pendulums
@@ -70,14 +81,12 @@ class MultiPendulumCartPoleEnv(gym.Env):
         if seed is not None:
             self._rng = np.random.default_rng(seed)
 
-        spread = 0.08
         self.state[0] = self._rng.uniform(-0.03, 0.03)
-        self.state[1] = self._rng.uniform(-0.03, 0.03)
-        theta = np.pi + self._rng.uniform(-spread, spread, size=self.num_pendulums)
-        self.state[2 : 2 + self.num_pendulums] = self._wrap_angles(theta).astype(np.float32)
-        self.state[2 + self.num_pendulums :] = self._rng.uniform(
-            -0.02, 0.02, size=self.num_pendulums
+        self.state[1] = self._sample_reset_x_dot()
+        self.state[2 : 2 + self.num_pendulums] = self._sample_reset_theta(1)[0].astype(
+            np.float32
         )
+        self.state[2 + self.num_pendulums :] = self._sample_reset_theta_dot(1)[0]
         self.step_count = 0
         return self._get_obs(), {}
 
@@ -200,11 +209,25 @@ class MultiPendulumCartPoleEnv(gym.Env):
 
         upright = float(np.mean(np.cos(theta)))
         centered = 1.0 - min((x / p.x_threshold) ** 2, 1.0)
-        velocity_cost = 0.01 * x_dot**2 + 0.002 * float(np.mean(theta_dot**2))
-        action_cost = 0.0005 * (force / p.force_mag) ** 2
-        reward = 1.0 + 0.5 * upright + 0.2 * centered - velocity_cost - action_cost
+        velocity_cost = (
+            p.x_velocity_cost_weight * x_dot**2
+            + p.theta_velocity_cost_weight * float(np.mean(theta_dot**2))
+        )
+        action_cost = p.action_cost_weight * (force / p.force_mag) ** 2
+        stable = self.is_stable()
+        energy_score = self._energy_score(theta, theta_dot)
+        reward = (
+            p.alive_reward
+            + p.upright_reward_weight * ((upright + 1.0) * 0.5)
+            + p.centered_reward_weight * centered
+            + p.energy_reward_weight * energy_score
+            - velocity_cost
+            - action_cost
+        )
+        if stable:
+            reward += p.stable_bonus
         if terminated:
-            reward -= 2.0
+            reward -= p.termination_penalty
         return float(reward)
 
     def _get_obs(self) -> np.ndarray:
@@ -213,6 +236,77 @@ class MultiPendulumCartPoleEnv(gym.Env):
     @staticmethod
     def _wrap_angles(theta: np.ndarray) -> np.ndarray:
         return (theta + np.pi) % (2 * np.pi) - np.pi
+
+    @staticmethod
+    def _validate_reset_mode(reset_mode: str) -> str:
+        valid_modes = {"downward", "upright", "uniform", "mixed"}
+        if reset_mode not in valid_modes:
+            raise ValueError(f"reset_mode must be one of {sorted(valid_modes)}")
+        return reset_mode
+
+    def _sample_reset_theta(self, count: int) -> np.ndarray:
+        spread = 0.08
+        mode = self.reset_mode
+        if mode == "mixed":
+            modes = self._rng.choice(
+                np.array(["downward", "upright", "uniform"]),
+                size=count,
+                p=np.array([0.45, 0.25, 0.30]),
+            )
+        else:
+            modes = np.full(count, mode)
+
+        theta = np.empty((count, self.num_pendulums), dtype=np.float64)
+        downward = modes == "downward"
+        upright = modes == "upright"
+        uniform = modes == "uniform"
+        if np.any(downward):
+            theta[downward] = np.pi + self._rng.uniform(
+                -spread,
+                spread,
+                size=(int(np.sum(downward)), self.num_pendulums),
+            )
+        if np.any(upright):
+            theta[upright] = self._rng.uniform(
+                -2.0 * spread,
+                2.0 * spread,
+                size=(int(np.sum(upright)), self.num_pendulums),
+            )
+        if np.any(uniform):
+            theta[uniform] = self._rng.uniform(
+                -np.pi,
+                np.pi,
+                size=(int(np.sum(uniform)), self.num_pendulums),
+            )
+        return self._wrap_angles(theta)
+
+    def _sample_reset_x_dot(self) -> float:
+        if self.reset_mode in {"mixed", "uniform"}:
+            return float(self._rng.uniform(-0.5, 0.5))
+        return float(self._rng.uniform(-0.03, 0.03))
+
+    def _sample_reset_theta_dot(self, count: int) -> np.ndarray:
+        if self.reset_mode == "mixed":
+            return self._rng.uniform(-4.0, 4.0, size=(count, self.num_pendulums)).astype(
+                np.float32
+            )
+        if self.reset_mode == "uniform":
+            return self._rng.uniform(-3.0, 3.0, size=(count, self.num_pendulums)).astype(
+                np.float32
+            )
+        return self._rng.uniform(-0.02, 0.02, size=(count, self.num_pendulums)).astype(
+            np.float32
+        )
+
+    def _energy_score(self, theta: np.ndarray, theta_dot: np.ndarray) -> float:
+        p = self.params
+        target_energy = 2.0 * p.gravity * p.pole_length
+        link_energy = (
+            0.5 * (p.pole_length * theta_dot) ** 2
+            + p.gravity * p.pole_length * (np.cos(theta) + 1.0)
+        )
+        normalized_error = (link_energy - target_energy) / target_energy
+        return -float(np.mean(normalized_error**2))
 
     def is_stable(self) -> bool:
         p = self.params

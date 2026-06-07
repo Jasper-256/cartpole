@@ -8,18 +8,32 @@ from cartpole_multi.config import NUM_PENDULUMS
 from cartpole_multi.env import MultiPendulumCartPoleEnv
 
 
-def make_env(num_pendulums: int = NUM_PENDULUMS, seed: int | None = None):
-    return MultiPendulumCartPoleEnv(num_pendulums=num_pendulums, seed=seed)
+def make_env(
+    num_pendulums: int = NUM_PENDULUMS,
+    reset_mode: str = "downward",
+    seed: int | None = None,
+):
+    return MultiPendulumCartPoleEnv(
+        num_pendulums=num_pendulums,
+        reset_mode=reset_mode,
+        seed=seed,
+    )
 
 
 def make_puffer_env(
     num_pendulums: int = NUM_PENDULUMS,
+    reset_mode: str = "downward",
     seed: int | None = None,
     buf=None,
 ):
     import pufferlib.emulation
 
-    env_creator = partial(make_env, num_pendulums=num_pendulums, seed=seed)
+    env_creator = partial(
+        make_env,
+        num_pendulums=num_pendulums,
+        reset_mode=reset_mode,
+        seed=seed,
+    )
     return pufferlib.emulation.GymnasiumPufferEnv(
         env_creator=env_creator,
         buf=buf,
@@ -33,6 +47,7 @@ def make_vec_env(
     num_envs: int = 1024,
     num_workers: int = 4,
     backend: str = "numpy",
+    reset_mode: str = "downward",
     seed: int = 0,
     **kwargs: Any,
 ):
@@ -41,6 +56,7 @@ def make_vec_env(
         return BatchedMultiPendulumCartPoleEnv(
             num_pendulums=num_pendulums,
             num_envs=num_envs,
+            reset_mode=reset_mode,
             seed=seed,
         )
 
@@ -48,7 +64,11 @@ def make_vec_env(
 
     if backend_name in {"serial", "debug"}:
         backend_obj = getattr(pufferlib.vector, "Serial", "Serial")
-        creator = partial(make_puffer_env, num_pendulums=num_pendulums)
+        creator = partial(
+            make_puffer_env,
+            num_pendulums=num_pendulums,
+            reset_mode=reset_mode,
+        )
         return pufferlib.vector.make(
             creator,
             num_envs=num_envs,
@@ -59,7 +79,11 @@ def make_vec_env(
 
     if backend_name in {"multiprocessing", "mp", "process"}:
         backend_obj = getattr(pufferlib.vector, "Multiprocessing", "Multiprocessing")
-        creator = partial(make_puffer_env, num_pendulums=num_pendulums)
+        creator = partial(
+            make_puffer_env,
+            num_pendulums=num_pendulums,
+            reset_mode=reset_mode,
+        )
         return pufferlib.vector.make(
             creator,
             num_envs=num_envs,

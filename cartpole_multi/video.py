@@ -11,6 +11,7 @@ import torch
 from PIL import Image, ImageDraw
 
 from cartpole_multi.env import MultiPendulumCartPoleEnv
+from cartpole_multi.observations import encode_observations
 
 
 def record_policy_video(torch_model, obs_dim: int, args: argparse.Namespace) -> str:
@@ -20,7 +21,11 @@ def record_policy_video(torch_model, obs_dim: int, args: argparse.Namespace) -> 
         f"cartpole_{args.num_pendulums}p_{args.total_timesteps}steps_seed{args.seed}.mp4"
     )
 
-    env = MultiPendulumCartPoleEnv(num_pendulums=args.num_pendulums, seed=args.seed + 10_000)
+    env = MultiPendulumCartPoleEnv(
+        num_pendulums=args.num_pendulums,
+        reset_mode=args.eval_reset_mode,
+        seed=args.seed + 10_000,
+    )
     obs, _info = env.reset()
     frames = [render_env_frame(env, width=args.video_width, height=args.video_height)]
 
@@ -28,13 +33,51 @@ def record_policy_video(torch_model, obs_dim: int, args: argparse.Namespace) -> 
     device = next(torch_model.parameters()).device
     with torch.no_grad():
         for _step in range(args.video_steps):
-            obs_tensor = torch.as_tensor(obs.reshape(1, obs_dim), dtype=torch.float32, device=device)
+            policy_obs = encode_observations(
+                obs,
+                args.num_pendulums,
+                args.observation_mode,
+            )
+            obs_tensor = torch.as_tensor(
+                policy_obs.reshape(1, obs_dim),
+                dtype=torch.float32,
+                device=device,
+            )
             logits, _value = torch_model(obs_tensor)
             action = int(torch.argmax(logits, dim=-1).item())
             obs, _reward, terminated, truncated, _info = env.step(action)
             frames.append(render_env_frame(env, width=args.video_width, height=args.video_height))
             if terminated or truncated:
                 break
+
+    write_video(frames, video_path, fps=args.video_fps)
+    return str(video_path)
+
+
+def record_action_video(
+    actions: list[int],
+    args: argparse.Namespace,
+    suffix: str = "actions",
+) -> str:
+    video_dir = Path(args.video_dir)
+    video_dir.mkdir(parents=True, exist_ok=True)
+    video_path = video_dir / (
+        f"cartpole_{args.num_pendulums}p_{suffix}_seed{args.seed}.mp4"
+    )
+
+    env = MultiPendulumCartPoleEnv(
+        num_pendulums=args.num_pendulums,
+        reset_mode=args.eval_reset_mode,
+        seed=args.seed,
+    )
+    _obs, _info = env.reset()
+    frames = [render_env_frame(env, width=args.video_width, height=args.video_height)]
+
+    for action in actions[: args.video_steps]:
+        _obs, _reward, terminated, truncated, _info = env.step(int(action))
+        frames.append(render_env_frame(env, width=args.video_width, height=args.video_height))
+        if terminated or truncated:
+            break
 
     write_video(frames, video_path, fps=args.video_fps)
     return str(video_path)

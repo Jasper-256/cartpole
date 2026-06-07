@@ -15,6 +15,7 @@ class BatchedMultiPendulumCartPoleEnv:
         num_pendulums: int = NUM_PENDULUMS,
         num_envs: int = 1024,
         params: CartPoleParams | None = None,
+        reset_mode: str = "downward",
         seed: int = 0,
     ) -> None:
         if num_pendulums < 1:
@@ -25,6 +26,7 @@ class BatchedMultiPendulumCartPoleEnv:
         self.num_pendulums = int(num_pendulums)
         self.num_envs = int(num_envs)
         self.params = params or CartPoleParams()
+        self.reset_mode = MultiPendulumCartPoleEnv._validate_reset_mode(reset_mode)
         self.single_action_space = spaces.Discrete(3)
         self.single_observation_space = spaces.Box(
             -np.inf,
@@ -101,20 +103,14 @@ class BatchedMultiPendulumCartPoleEnv:
         return None
 
     def _reset_indices(self, indices: np.ndarray) -> None:
-        spread = 0.08
         count = len(indices)
-        theta = np.pi + self._rng.uniform(-spread, spread, size=(count, self.num_pendulums))
 
         self.state[indices, 0] = self._rng.uniform(-0.03, 0.03, size=count)
-        self.state[indices, 1] = self._rng.uniform(-0.03, 0.03, size=count)
-        self.state[indices, 2 : 2 + self.num_pendulums] = (
-            MultiPendulumCartPoleEnv._wrap_angles(theta).astype(np.float32)
-        )
-        self.state[indices, 2 + self.num_pendulums :] = self._rng.uniform(
-            -0.02,
-            0.02,
-            size=(count, self.num_pendulums),
-        )
+        self.state[indices, 1] = self._sample_reset_x_dot(count)
+        self.state[indices, 2 : 2 + self.num_pendulums] = self._sample_reset_theta(
+            count
+        ).astype(np.float32)
+        self.state[indices, 2 + self.num_pendulums :] = self._sample_reset_theta_dot(count)
         self.step_count[indices] = 0
 
     def _mass_matrix(self, theta: np.ndarray) -> np.ndarray:
@@ -190,9 +186,86 @@ class BatchedMultiPendulumCartPoleEnv:
 
         upright = np.mean(np.cos(theta), axis=1)
         centered = 1.0 - np.minimum((x / p.x_threshold) ** 2, 1.0)
-        velocity_cost = 0.01 * x_dot**2 + 0.002 * np.mean(theta_dot**2, axis=1)
-        action_cost = 0.0005 * (force / p.force_mag) ** 2
-        reward = 1.0 + 0.5 * upright + 0.2 * centered - velocity_cost - action_cost
+        velocity_cost = (
+            p.x_velocity_cost_weight * x_dot**2
+            + p.theta_velocity_cost_weight * np.mean(theta_dot**2, axis=1)
+        )
+        action_cost = p.action_cost_weight * (force / p.force_mag) ** 2
+        stable = (
+            (np.abs(x) <= p.stable_x_threshold)
+            & np.all(np.abs(theta) <= p.stable_theta_threshold, axis=1)
+            & np.all(np.abs(theta_dot) <= p.stable_theta_dot_threshold, axis=1)
+        )
+        target_energy = 2.0 * p.gravity * p.pole_length
+        link_energy = (
+            0.5 * (p.pole_length * theta_dot) ** 2
+            + p.gravity * p.pole_length * (np.cos(theta) + 1.0)
+        )
+        normalized_error = (link_energy - target_energy) / target_energy
+        energy_score = -np.mean(normalized_error**2, axis=1)
+        reward = (
+            p.alive_reward
+            + p.upright_reward_weight * ((upright + 1.0) * 0.5)
+            + p.centered_reward_weight * centered
+            + p.energy_reward_weight * energy_score
+            - velocity_cost
+            - action_cost
+        )
+        reward[stable] += p.stable_bonus
         reward = reward.astype(np.float32)
-        reward[terminated] -= 2.0
+        reward[terminated] -= p.termination_penalty
         return reward
+
+    def _sample_reset_theta(self, count: int) -> np.ndarray:
+        spread = 0.08
+        mode = self.reset_mode
+        if mode == "mixed":
+            modes = self._rng.choice(
+                np.array(["downward", "upright", "uniform"]),
+                size=count,
+                p=np.array([0.45, 0.25, 0.30]),
+            )
+        else:
+            modes = np.full(count, mode)
+
+        theta = np.empty((count, self.num_pendulums), dtype=np.float64)
+        downward = modes == "downward"
+        upright = modes == "upright"
+        uniform = modes == "uniform"
+        if np.any(downward):
+            theta[downward] = np.pi + self._rng.uniform(
+                -spread,
+                spread,
+                size=(int(np.sum(downward)), self.num_pendulums),
+            )
+        if np.any(upright):
+            theta[upright] = self._rng.uniform(
+                -2.0 * spread,
+                2.0 * spread,
+                size=(int(np.sum(upright)), self.num_pendulums),
+            )
+        if np.any(uniform):
+            theta[uniform] = self._rng.uniform(
+                -np.pi,
+                np.pi,
+                size=(int(np.sum(uniform)), self.num_pendulums),
+            )
+        return MultiPendulumCartPoleEnv._wrap_angles(theta)
+
+    def _sample_reset_x_dot(self, count: int) -> np.ndarray:
+        if self.reset_mode in {"mixed", "uniform"}:
+            return self._rng.uniform(-0.5, 0.5, size=count).astype(np.float32)
+        return self._rng.uniform(-0.03, 0.03, size=count).astype(np.float32)
+
+    def _sample_reset_theta_dot(self, count: int) -> np.ndarray:
+        if self.reset_mode == "mixed":
+            return self._rng.uniform(-4.0, 4.0, size=(count, self.num_pendulums)).astype(
+                np.float32
+            )
+        if self.reset_mode == "uniform":
+            return self._rng.uniform(-3.0, 3.0, size=(count, self.num_pendulums)).astype(
+                np.float32
+            )
+        return self._rng.uniform(-0.02, 0.02, size=(count, self.num_pendulums)).astype(
+            np.float32
+        )

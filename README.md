@@ -31,30 +31,36 @@ python -m pip install -e .
 
 ## Quick Smoke Runs
 
-Use the main trainer with a small timestep budget to check that the environment
-and PPO loop are working:
+Use the main trainer to optimize a controller and then record a video:
 
 ```bash
-python -m cartpole_multi.train --num-pendulums 1 --total-timesteps 1024
-python -m cartpole_multi.train --num-pendulums 2 --total-timesteps 1024
+python -m cartpole_multi.train --num-pendulums 1
+python -m cartpole_multi.train --num-pendulums 2
 ```
 
-For a slightly longer two-pendulum check:
+The default optimizer is a generic cross-entropy method (CEM) over the configured
+pendulum count. It is compute-heavy, but it is the path intended for the
+downward swing-up task and still uses the same `train` entrypoint. For a quick
+smoke check, shrink the CEM search and skip video:
 
 ```bash
-python -m cartpole_multi.train --num-pendulums 2 --total-timesteps 2048
+python -m cartpole_multi.train --num-pendulums 2 --no-video --video-steps 5 \
+  --cem-envs 64 --cem-iterations 1 --cem-segments 4 \
+  --cem-planner-envs 64 --cem-planner-iterations 1 --cem-planner-horizon 4
 ```
 
-The default training backend is the fast batched NumPy path:
+The PPO loop is still available when you want neural-policy training:
 
 ```bash
-python -m cartpole_multi.train --num-pendulums 2 --total-timesteps 1000000 --no-video
+python -m cartpole_multi.train --optimizer ppo --num-pendulums 2 \
+  --total-timesteps 1000000 --no-video
 ```
 
 Use the PufferLib wrapper explicitly when you want to compare it:
 
 ```bash
-python -m cartpole_multi.train --num-pendulums 2 --backend multiprocessing --num-workers 4 --num-envs 64 --no-video
+python -m cartpole_multi.train --optimizer ppo --num-pendulums 2 \
+  --backend multiprocessing --num-workers 4 --num-envs 64 --no-video
 ```
 
 Each run saves a post-training evaluation video to `videos/` and tries to open
@@ -62,7 +68,7 @@ it when training finishes. Use `--no-open-video` to save without opening, or
 `--no-video` to skip rendering:
 
 ```bash
-python -m cartpole_multi.train --num-pendulums 2 --total-timesteps 2048 --no-open-video
+python -m cartpole_multi.train --num-pendulums 2 --no-open-video
 ```
 
 Training logs include an upright stabilization metric:
@@ -77,5 +83,9 @@ By default a timestep is stable when `|x| <= 0.5`, every `|theta| <= 12 deg`
 `--stable-x-threshold`, `--stable-theta-threshold`, and
 `--stable-theta-dot-threshold`.
 
-For maximum throughput on this small model, keep the default `--backend numpy`
-and use a large environment batch such as `--num-envs 1024`.
+For maximum PPO throughput on this small model, keep `--backend numpy` and use a
+large environment batch such as `--num-envs 1024`.
+
+Training also supports `--reset-mode {downward,upright,uniform,mixed}` and
+`--observation-mode {trig,raw}`. The default policy input uses trig angle
+features so the network does not have to learn across the raw angle wrap.
