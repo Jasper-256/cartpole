@@ -11,6 +11,7 @@ from torch.distributions.categorical import Categorical
 
 from cartpole_multi.config import NUM_PENDULUMS
 from cartpole_multi.puffer_env import make_vec_env
+from cartpole_multi.video import open_video, record_policy_video
 
 
 @dataclass
@@ -23,6 +24,7 @@ class TrainResult:
     last_mean_length: float
     stable_timesteps: int
     stable_rate: float
+    video_path: str | None
 
 
 class ActorCritic(nn.Module):
@@ -223,6 +225,13 @@ def train(args: argparse.Namespace) -> TrainResult:
     if close is not None:
         close()
 
+    video_path = None
+    if args.video:
+        video_path = record_policy_video(model, obs_dim, args)
+        print(f"saved_video={video_path}")
+        if args.open_video:
+            open_video(video_path)
+
     elapsed = max(time.time() - start, 1e-9)
     return TrainResult(
         num_pendulums=args.num_pendulums,
@@ -233,6 +242,7 @@ def train(args: argparse.Namespace) -> TrainResult:
         last_mean_length=float(np.mean(recent_lengths)) if recent_lengths else 0.0,
         stable_timesteps=stable_timesteps,
         stable_rate=stable_timesteps / max(global_step, 1),
+        video_path=video_path,
     )
 
 
@@ -277,6 +287,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stable-theta-threshold", type=float, default=float(np.deg2rad(12.0)))
     parser.add_argument("--stable-theta-dot-threshold", type=float, default=1.0)
     parser.add_argument("--stable-window-timesteps", type=int, default=4096)
+    parser.add_argument("--video", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--open-video", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--video-dir", default="videos")
+    parser.add_argument("--video-steps", type=int, default=500)
+    parser.add_argument("--video-fps", type=int, default=50)
+    parser.add_argument("--video-width", type=int, default=800)
+    parser.add_argument("--video-height", type=int, default=450)
     return parser.parse_args()
 
 
@@ -291,7 +308,8 @@ def main() -> None:
         f"mean_return={result.last_mean_reward:.2f} "
         f"mean_len={result.last_mean_length:.1f} "
         f"stable_steps={result.stable_timesteps} "
-        f"stable_rate={result.stable_rate:.3f}"
+        f"stable_rate={result.stable_rate:.3f} "
+        f"video={result.video_path}"
     )
 
 

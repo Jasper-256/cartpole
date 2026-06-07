@@ -132,7 +132,7 @@ class MultiPendulumCartPoleEnv(gym.Env):
         info = {
             "x": x,
             "upright": float(np.mean(np.cos(theta))),
-            "stable": self._is_stable(),
+            "stable": self.is_stable(),
             "num_pendulums": self.num_pendulums,
         }
         return self._get_obs(), reward, terminated, truncated, info
@@ -156,7 +156,7 @@ class MultiPendulumCartPoleEnv(gym.Env):
     def _get_obs(self) -> np.ndarray:
         return self.state.astype(np.float32, copy=True)
 
-    def _is_stable(self) -> bool:
+    def is_stable(self) -> bool:
         p = self.params
         x = float(self.state[0])
         theta = self.state[2 : 2 + self.num_pendulums]

@@ -38,6 +38,14 @@ For a slightly longer two-pendulum check:
 python -m cartpole_multi.train --num-pendulums 2 --total-timesteps 2048
 ```
 
+Each run saves a post-training evaluation video to `videos/` and tries to open
+it when training finishes. Use `--no-open-video` to save without opening, or
+`--no-video` to skip rendering:
+
+```bash
+python -m cartpole_multi.train --num-pendulums 2 --total-timesteps 2048 --no-open-video
+```
+
 Training logs include a stabilization metric:
 
 - `stable_steps`: count of env-timesteps where the cart is near center and all
