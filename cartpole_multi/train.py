@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import time
 from dataclasses import dataclass
 
@@ -75,16 +76,20 @@ def train(args: argparse.Namespace) -> TrainResult:
     model = ActorCritic(obs_dim, action_dim).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate, eps=1e-5)
 
-    rollout_size = args.num_envs * args.rollout_steps
-    updates = max(1, args.total_timesteps // rollout_size)
+    rollout_steps = min(
+        args.rollout_steps,
+        max(1, math.ceil(args.total_timesteps / args.num_envs)),
+    )
+    rollout_size = args.num_envs * rollout_steps
+    updates = max(1, math.ceil(args.total_timesteps / rollout_size))
     minibatch_size = min(args.minibatch_size, rollout_size)
 
-    obs_buf = torch.zeros((args.rollout_steps, args.num_envs, obs_dim), device=device)
-    actions_buf = torch.zeros((args.rollout_steps, args.num_envs), device=device, dtype=torch.long)
-    logprobs_buf = torch.zeros((args.rollout_steps, args.num_envs), device=device)
-    rewards_buf = torch.zeros((args.rollout_steps, args.num_envs), device=device)
-    dones_buf = torch.zeros((args.rollout_steps, args.num_envs), device=device)
-    values_buf = torch.zeros((args.rollout_steps, args.num_envs), device=device)
+    obs_buf = torch.zeros((rollout_steps, args.num_envs, obs_dim), device=device)
+    actions_buf = torch.zeros((rollout_steps, args.num_envs), device=device, dtype=torch.long)
+    logprobs_buf = torch.zeros((rollout_steps, args.num_envs), device=device)
+    rewards_buf = torch.zeros((rollout_steps, args.num_envs), device=device)
+    dones_buf = torch.zeros((rollout_steps, args.num_envs), device=device)
+    values_buf = torch.zeros((rollout_steps, args.num_envs), device=device)
 
     episode_returns = np.zeros(args.num_envs, dtype=np.float32)
     episode_lengths = np.zeros(args.num_envs, dtype=np.int32)
@@ -98,16 +103,16 @@ def train(args: argparse.Namespace) -> TrainResult:
 
     for update in range(1, updates + 1):
         update_stable_timesteps = 0
-        for step in range(args.rollout_steps):
+        for step in range(rollout_steps):
             global_step += args.num_envs
             obs_tensor = torch.as_tensor(obs.reshape(args.num_envs, obs_dim), device=device)
+            obs_buf[step] = obs_tensor
             with torch.no_grad():
                 action, logprob, _entropy, value = model.get_action_and_value(obs_tensor)
 
             next_obs, reward, terminated, truncated, _infos = envs.step(action.cpu().numpy())
             done = np.logical_or(terminated, truncated)
 
-            obs_buf[step] = obs_tensor
             actions_buf[step] = action
             logprobs_buf[step] = logprob
             rewards_buf[step] = torch.as_tensor(reward, dtype=torch.float32, device=device)
@@ -140,8 +145,8 @@ def train(args: argparse.Namespace) -> TrainResult:
             next_value = model(next_obs_tensor)[1]
             advantages = torch.zeros_like(rewards_buf, device=device)
             lastgaelam = torch.zeros(args.num_envs, device=device)
-            for t in reversed(range(args.rollout_steps)):
-                if t == args.rollout_steps - 1:
+            for t in reversed(range(rollout_steps)):
+                if t == rollout_steps - 1:
                     next_non_terminal = 1.0 - dones_buf[t]
                     next_values = next_value
                 else:
@@ -221,6 +226,8 @@ def train(args: argparse.Namespace) -> TrainResult:
                 f"recent_stable_rate={recent_stable_rate:.3f}"
             )
 
+    train_elapsed = max(time.time() - start, 1e-9)
+
     close = getattr(envs, "close", None)
     if close is not None:
         close()
@@ -232,12 +239,11 @@ def train(args: argparse.Namespace) -> TrainResult:
         if args.open_video:
             open_video(video_path)
 
-    elapsed = max(time.time() - start, 1e-9)
     return TrainResult(
         num_pendulums=args.num_pendulums,
         total_timesteps=global_step,
         updates=updates,
-        steps_per_second=global_step / elapsed,
+        steps_per_second=global_step / train_elapsed,
         last_mean_reward=float(np.mean(recent_returns)) if recent_returns else 0.0,
         last_mean_length=float(np.mean(recent_lengths)) if recent_lengths else 0.0,
         stable_timesteps=stable_timesteps,
@@ -266,12 +272,16 @@ def stable_observations(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--num-pendulums", type=int, default=NUM_PENDULUMS)
-    parser.add_argument("--total-timesteps", type=int, default=4096)
-    parser.add_argument("--num-envs", type=int, default=16)
+    parser.add_argument("--total-timesteps", type=int, default=131_072)
+    parser.add_argument("--num-envs", type=int, default=1024)
     parser.add_argument("--num-workers", type=int, default=4)
-    parser.add_argument("--backend", choices=["serial", "multiprocessing"], default="serial")
-    parser.add_argument("--rollout-steps", type=int, default=64)
-    parser.add_argument("--minibatch-size", type=int, default=256)
+    parser.add_argument(
+        "--backend",
+        choices=["numpy", "serial", "multiprocessing"],
+        default="numpy",
+    )
+    parser.add_argument("--rollout-steps", type=int, default=128)
+    parser.add_argument("--minibatch-size", type=int, default=16384)
     parser.add_argument("--update-epochs", type=int, default=2)
     parser.add_argument("--learning-rate", type=float, default=2.5e-4)
     parser.add_argument("--gamma", type=float, default=0.99)

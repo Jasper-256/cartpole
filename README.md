@@ -11,8 +11,10 @@ NUM_PENDULUMS = 1
 ```
 
 The environment is a flat `gymnasium.Env` with a `Discrete(3)` action space and
-`Box` observations, then wrapped with `pufferlib.emulation.GymnasiumPufferEnv`
-and vectorized through `pufferlib.vector.make`.
+`Box` observations. Training defaults to a fast NumPy batched backend, and the
+Gymnasium environment can still be wrapped with
+`pufferlib.emulation.GymnasiumPufferEnv` and vectorized through
+`pufferlib.vector.make` with the `serial` or `multiprocessing` backends.
 
 Episodes reset with the chain hanging downward, which is the natural resting
 state. The stabilization target is still upright.
@@ -29,8 +31,8 @@ python -m pip install -e .
 
 ## Quick Smoke Runs
 
-Use the main trainer with a small timestep budget to check that the environment,
-PufferLib wrapper, and PPO loop are working:
+Use the main trainer with a small timestep budget to check that the environment
+and PPO loop are working:
 
 ```bash
 python -m cartpole_multi.train --num-pendulums 1 --total-timesteps 1024
@@ -41,6 +43,18 @@ For a slightly longer two-pendulum check:
 
 ```bash
 python -m cartpole_multi.train --num-pendulums 2 --total-timesteps 2048
+```
+
+The default training backend is the fast batched NumPy path:
+
+```bash
+python -m cartpole_multi.train --num-pendulums 2 --total-timesteps 1000000 --no-video
+```
+
+Use the PufferLib wrapper explicitly when you want to compare it:
+
+```bash
+python -m cartpole_multi.train --num-pendulums 2 --backend multiprocessing --num-workers 4 --num-envs 64 --no-video
 ```
 
 Each run saves a post-training evaluation video to `videos/` and tries to open
@@ -63,5 +77,5 @@ By default a timestep is stable when `|x| <= 0.5`, every `|theta| <= 12 deg`
 `--stable-x-threshold`, `--stable-theta-threshold`, and
 `--stable-theta-dot-threshold`.
 
-Use `--backend multiprocessing --num-workers 4 --num-envs 64` for a faster
-CPU-vectorized run once the basic serial quick run is working.
+For maximum throughput on this small model, keep the default `--backend numpy`
+and use a large environment batch such as `--num-envs 1024`.
