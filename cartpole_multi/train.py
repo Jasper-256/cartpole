@@ -207,10 +207,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stable-theta-dot-threshold", type=float, default=1.0)
 
     parser.add_argument("--trajectory-seed", type=int, default=42)
-    parser.add_argument("--trajectory-batch-size", type=int, default=None)
+    parser.add_argument("--trajectory-batch-size", type=int, default=131072)
     parser.add_argument("--trajectory-segments", type=int, default=90)
     parser.add_argument("--trajectory-action-repeat", type=int, default=5)
-    parser.add_argument("--trajectory-iterations", type=int, default=12)
+    parser.add_argument("--trajectory-iterations", type=int, default=50)
     parser.add_argument("--trajectory-elite-frac", type=float, default=0.025)
     parser.add_argument("--trajectory-mutation-rate", type=float, default=0.08)
     parser.add_argument("--trajectory-upright-reward", type=float, default=3.0)

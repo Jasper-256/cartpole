@@ -48,7 +48,7 @@ when training finishes. Use `--no-open-video` to save without opening, or
 ## Main Knobs
 
 - `--trajectory-batch-size`: number of candidate segment sequences scored per
-  update. Defaults to `131072` on CUDA and `65536` on MPS.
+  update. Defaults to `131072`.
 - `--trajectory-iterations`: number of trajectory search updates.
 - `--trajectory-segments`: number of action segments in the plan.
 - `--trajectory-action-repeat`: simulator steps per action segment.

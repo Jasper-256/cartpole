@@ -41,20 +41,12 @@ def resolve_torch_device(requested: str) -> torch.device:
     return torch.device(requested)
 
 
-def default_trajectory_batch_size(device: torch.device) -> int:
-    if device.type == "cuda":
-        return 131_072
-    if device.type == "mps":
-        return 65_536
-    return 16_384
-
-
 def optimize_trajectory_plan(args: argparse.Namespace) -> TrajectoryPlan:
     if args.num_pendulums != 2:
         raise ValueError("trajectory optimizer currently supports --num-pendulums 2")
 
     device = resolve_torch_device(args.device)
-    batch_size = args.trajectory_batch_size or default_trajectory_batch_size(device)
+    batch_size = args.trajectory_batch_size
     params = CartPoleParams()
 
     base_env = MultiPendulumCartPoleEnv(
