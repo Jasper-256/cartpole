@@ -1,15 +1,16 @@
 [project]
 name = "cartpole-multi"
 version = "0.1.0"
-description = "GPU batched trajectory optimization for a configurable multi-pendulum cartpole."
+description = "Native Metal ES training for a configurable multi-pendulum cartpole."
 requires-python = ">=3.10,<3.13"
 dependencies = [
-    "gymnasium>=0.29",
     "numpy>=1.24",
     "pillow>=8.3",
-    "pufferlib>=3.0",
     "torch>=2.0",
 ]
 
 [tool.ruff]
 line-length = 100
+
+[tool.setuptools.packages.find]
+include = ["cartpole_multi*"]

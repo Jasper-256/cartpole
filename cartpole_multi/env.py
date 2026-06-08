@@ -2,9 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import gymnasium as gym
 import numpy as np
-from gymnasium import spaces
 
 from cartpole_multi.config import NUM_PENDULUMS
 
@@ -41,7 +39,7 @@ class CartPoleParams:
     termination_penalty: float = 150.0
 
 
-class MultiPendulumCartPoleEnv(gym.Env):
+class MultiPendulumCartPoleEnv:
     """A lightweight cartpole with an N-link pendulum chain on one cart.
 
     The pendulums are equal-length serial links, so ``num_pendulums=2`` means a
@@ -49,9 +47,6 @@ class MultiPendulumCartPoleEnv(gym.Env):
     cart. Angles are absolute link angles measured from upright: ``theta=0`` is
     the stabilization target and ``theta=pi`` is the natural hanging pose.
     """
-
-    metadata = {"render_modes": []}
-
     def __init__(
         self,
         num_pendulums: int = NUM_PENDULUMS,
@@ -59,18 +54,13 @@ class MultiPendulumCartPoleEnv(gym.Env):
         reset_mode: str = "downward",
         seed: int | None = None,
     ) -> None:
-        super().__init__()
         if num_pendulums < 1:
             raise ValueError("num_pendulums must be at least 1")
 
         self.num_pendulums = int(num_pendulums)
         self.params = params or CartPoleParams()
         self.reset_mode = self._validate_reset_mode(reset_mode)
-        self.action_space = spaces.Discrete(3)
-
         obs_dim = 2 + 2 * self.num_pendulums
-        high = np.full(obs_dim, np.inf, dtype=np.float32)
-        self.observation_space = spaces.Box(-high, high, dtype=np.float32)
 
         self.state = np.zeros(obs_dim, dtype=np.float32)
         self.step_count = 0
@@ -82,7 +72,7 @@ class MultiPendulumCartPoleEnv(gym.Env):
         seed: int | None = None,
         options: dict | None = None,
     ) -> tuple[np.ndarray, dict]:
-        super().reset(seed=seed)
+        del options
         if seed is not None:
             self._rng = np.random.default_rng(seed)
 
@@ -95,13 +85,9 @@ class MultiPendulumCartPoleEnv(gym.Env):
         self.step_count = 0
         return self._get_obs(), {}
 
-    def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict]:
-        action = int(action)
-        if action < 0 or action >= self.action_space.n:
-            raise ValueError(f"invalid action {action}")
-
+    def step_force(self, force: float) -> tuple[np.ndarray, float, bool, bool, dict]:
         p = self.params
-        force = (action - 1) * p.force_mag
+        force = float(np.clip(force, -p.force_mag, p.force_mag))
         x = float(self.state[0])
         x_dot = float(self.state[1])
         previous_theta = self.state[2 : 2 + self.num_pendulums].astype(np.float64)

@@ -4,10 +4,10 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
-from gymnasium import spaces
 
 from cartpole_multi.config import NUM_PENDULUMS
 from cartpole_multi.env import CartPoleParams
+from cartpole_multi.observations import observation_dim, policy_observation_from_state
 
 
 RESET_MODES = ("downward", "upright", "uniform", "mixed")
@@ -42,25 +42,8 @@ def synchronize_device(device: torch.device) -> None:
         torch.mps.synchronize()
 
 
-def observation_dim(num_pendulums: int) -> int:
-    return 2 + 3 * int(num_pendulums)
-
-
-def policy_observation_from_state(
-    state: torch.Tensor,
-    num_pendulums: int,
-    params: CartPoleParams,
-) -> torch.Tensor:
-    n = int(num_pendulums)
-    x = state[:, 0:1] / params.x_threshold
-    x_dot = state[:, 1:2] / 5.0
-    theta = state[:, 2 : 2 + n]
-    theta_dot = state[:, 2 + n :] / 10.0
-    return torch.cat((x, x_dot, torch.sin(theta), torch.cos(theta), theta_dot), dim=1)
-
-
 class TorchMultiPendulumCartPoleEnv:
-    """Batched torch cartpole environment with all rollout state on one device."""
+    """Batched torch cartpole environment used for GPU evaluation."""
 
     def __init__(
         self,
@@ -88,15 +71,7 @@ class TorchMultiPendulumCartPoleEnv:
         self.dtype = torch.float32
         self.raw_state_dim = 2 + 2 * self.num_pendulums
         self.observation_dim = observation_dim(self.num_pendulums)
-        self.num_agents = self.num_envs
         self.generator = torch.Generator(device=self.device)
-        self.single_observation_space = spaces.Box(
-            -np.inf,
-            np.inf,
-            shape=(self.observation_dim,),
-            dtype=np.float32,
-        )
-        self.single_action_space = spaces.Discrete(3)
 
         n = self.num_pendulums
         idx = torch.arange(n, dtype=self.dtype, device=self.device)
@@ -133,21 +108,24 @@ class TorchMultiPendulumCartPoleEnv:
         return self.observation()
 
     def observation(self) -> torch.Tensor:
-        return policy_observation_from_state(self.state, self.num_pendulums, self.params)
+        return policy_observation_from_state(
+            self.state,
+            self.num_pendulums,
+            self.params,
+        )
 
     @torch.no_grad()
-    def step(self, action: torch.Tensor) -> TorchStep:
+    def step_force(self, force: torch.Tensor) -> TorchStep:
         if self.num_pendulums == 2:
-            return self._step_two_pendulums(action)
-        return self._step_generic(action)
+            return self._step_two_pendulums_force(force)
+        return self._step_generic_force(force)
 
-    def _step_generic(self, action: torch.Tensor) -> TorchStep:
-        action = action.to(device=self.device, dtype=self.dtype).view(self.num_envs)
+    def _step_generic_force(self, force: torch.Tensor) -> TorchStep:
+        force = force.to(device=self.device, dtype=self.dtype).view(self.num_envs)
         p = self.params
         n = self.num_pendulums
 
         previous_state = self.state
-        force = (action - 1.0) * p.force_mag
         x = previous_state[:, 0]
         x_dot = previous_state[:, 1]
         theta = previous_state[:, 2 : 2 + n]
@@ -213,7 +191,12 @@ class TorchMultiPendulumCartPoleEnv:
             torch.mean(torch.log(torch.clamp(link_height, min=1e-4, max=1.0)), dim=1)
         )
         controlled_upright = chain_height * torch.exp(
-            -torch.mean((theta_dot / self.params.stable_theta_dot_threshold).square(), dim=1)
+            -0.5
+            * torch.mean(
+                (theta / self.params.stable_theta_threshold).square()
+                + (theta_dot / self.params.stable_theta_dot_threshold).square(),
+                dim=1,
+            )
         )
         return TorchStep(
             observation=self.observation(),
@@ -237,12 +220,11 @@ class TorchMultiPendulumCartPoleEnv:
             },
         )
 
-    def _step_two_pendulums(self, action: torch.Tensor) -> TorchStep:
-        action = action.to(device=self.device, dtype=self.dtype).view(self.num_envs)
+    def _step_two_pendulums_force(self, force: torch.Tensor) -> TorchStep:
+        force = force.to(device=self.device, dtype=self.dtype).view(self.num_envs)
         p = self.params
         state = self.state
 
-        force = (action - 1.0) * p.force_mag
         x = state[:, 0]
         x_dot = state[:, 1]
         theta_1 = state[:, 2]
@@ -452,7 +434,9 @@ class TorchMultiPendulumCartPoleEnv:
         controlled_upright = chain_height * torch.exp(
             -0.5
             * (
-                (theta_dot_1 / p.stable_theta_dot_threshold).square()
+                (theta_1 / p.stable_theta_threshold).square()
+                + (theta_2 / p.stable_theta_threshold).square()
+                + (theta_dot_1 / p.stable_theta_dot_threshold).square()
                 + (theta_dot_2 / p.stable_theta_dot_threshold).square()
             )
         )

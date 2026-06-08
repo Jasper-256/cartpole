@@ -3,7 +3,8 @@
 #include <mach/mach_time.h>
 
 enum {
-    WEIGHT_COUNT = 27,
+    FEATURE_COUNT = 24,
+    WEIGHT_COUNT = 25,
     THREADGROUP_SIZE = 128,
 };
 
@@ -27,7 +28,8 @@ static double now_seconds(void) {
 static NSString *kernelSource(void) {
     return @"#include <metal_stdlib>\n"
             "using namespace metal;\n"
-            "#define WEIGHT_COUNT 27u\n"
+            "#define FEATURE_COUNT 24u\n"
+            "#define WEIGHT_COUNT 25u\n"
             "#define THREADGROUP_SIZE 128u\n"
             "struct TrainParams { uint steps; uint num_envs; uint num_groups; uint iteration; float sigma; float learning_rate; };\n"
             "constant float DT = 0.02f;\n"
@@ -51,7 +53,10 @@ static NSString *kernelSource(void) {
             "    return float(hash_u32(seed)) * (1.0f / 4294967296.0f);\n"
             "}\n"
             "inline float eps_sign(uint env_id, uint weight_id, uint iteration) {\n"
-            "    return (hash_u32(env_id * 747796405u + weight_id * 2891336453u + iteration * 277803737u) & 1u) ? 1.0f : -1.0f;\n"
+            "    uint pair_id = env_id >> 1u;\n"
+            "    float pair_sign = (env_id & 1u) ? -1.0f : 1.0f;\n"
+            "    float weight_sign = (hash_u32(pair_id * 747796405u + weight_id * 2891336453u + iteration * 277803737u) & 1u) ? 1.0f : -1.0f;\n"
+            "    return pair_sign * weight_sign;\n"
             "}\n"
             "inline float wrap_angle(float theta) {\n"
             "    const float pi = 3.14159265358979323846f;\n"
@@ -74,35 +79,62 @@ static NSString *kernelSource(void) {
             "            eps[j] = eps_sign(gid, j, params.iteration);\n"
             "            local_weights[j] = weights[j] + params.sigma * eps[j];\n"
             "        }\n"
-            "        float u = rand01(gid + params.iteration * 1315423911u);\n"
-            "        float x = 0.06f * u - 0.03f;\n"
-            "        float x_dot = 0.03f - 0.06f * u;\n"
-            "        float theta_1 = 3.14159265358979323846f - 0.08f + 0.16f * u;\n"
-            "        float theta_2 = 3.14159265358979323846f + 0.08f - 0.16f * u;\n"
-            "        float theta_dot_1 = -0.02f + 0.04f * u;\n"
-            "        float theta_dot_2 = 0.02f - 0.04f * u;\n"
+            "        uint pair_id = gid >> 1u;\n"
+            "        float u0 = rand01(pair_id * 13u + params.iteration * 1315423911u);\n"
+            "        float u1 = rand01(pair_id * 17u + params.iteration * 2654435761u);\n"
+            "        float u2 = rand01(pair_id * 19u + params.iteration * 2246822519u);\n"
+            "        float u3 = rand01(pair_id * 23u + params.iteration * 3266489917u);\n"
+            "        float x = 0.06f * u0 - 0.03f;\n"
+            "        float x_dot = 0.06f * u1 - 0.03f;\n"
+            "        float theta_1 = 3.14159265358979323846f - 0.08f + 0.16f * u2;\n"
+            "        float theta_2 = 3.14159265358979323846f - 0.08f + 0.16f * u3;\n"
+            "        float upright_case = 0.0f;\n"
+            "        float theta_dot_1 = -0.02f + 0.04f * u1;\n"
+            "        float theta_dot_2 = 0.02f - 0.04f * u0;\n"
             "        for (uint step = 0u; step < params.steps; ++step) {\n"
-            "            float obs[8];\n"
-            "            obs[0] = x / X_THRESHOLD;\n"
-            "            obs[1] = x_dot / 5.0f;\n"
-            "            obs[2] = sin(theta_1);\n"
-            "            obs[3] = sin(theta_2);\n"
-            "            obs[4] = cos(theta_1);\n"
-            "            obs[5] = cos(theta_2);\n"
-            "            obs[6] = theta_dot_1 / 10.0f;\n"
-            "            obs[7] = theta_dot_2 / 10.0f;\n"
-            "            float best_logit = -INFINITY;\n"
-            "            uint action = 0u;\n"
-            "            for (uint a = 0u; a < 3u; ++a) {\n"
-            "                uint offset = a * 9u;\n"
-            "                float logit = local_weights[offset + 8u];\n"
-            "                for (uint j = 0u; j < 8u; ++j) logit += local_weights[offset + j] * obs[j];\n"
-            "                if (logit > best_logit) {\n"
-            "                    best_logit = logit;\n"
-            "                    action = a;\n"
-            "                }\n"
-            "            }\n"
-            "            float force = (float(action) - 1.0f) * FORCE_MAG;\n"
+            "            float obs[FEATURE_COUNT];\n"
+            "            float norm_x = x / X_THRESHOLD;\n"
+            "            float norm_x_dot = x_dot / 5.0f;\n"
+            "            float upright_gate = exp(-0.25f * ((theta_1 / 0.7f) * (theta_1 / 0.7f) + (theta_2 / 0.7f) * (theta_2 / 0.7f)));\n"
+            "            float swing_gate = 1.0f - upright_gate;\n"
+            "            float sin_feature_1 = sin(theta_1);\n"
+            "            float sin_feature_2 = sin(theta_2);\n"
+            "            float cos_feature_1 = cos(theta_1);\n"
+            "            float cos_feature_2 = cos(theta_2);\n"
+            "            float norm_theta_dot_1 = theta_dot_1 / 10.0f;\n"
+            "            float norm_theta_dot_2 = theta_dot_2 / 10.0f;\n"
+            "            float energy_target_feature = 2.0f * GRAVITY * POLE_LENGTH;\n"
+            "            float energy_1_feature = 0.5f * (POLE_LENGTH * theta_dot_1) * (POLE_LENGTH * theta_dot_1) + GRAVITY * POLE_LENGTH * (cos_feature_1 + 1.0f);\n"
+            "            float energy_2_feature = 0.5f * (POLE_LENGTH * theta_dot_2) * (POLE_LENGTH * theta_dot_2) + GRAVITY * POLE_LENGTH * (cos_feature_2 + 1.0f);\n"
+            "            float energy_error_1 = (energy_1_feature - energy_target_feature) / energy_target_feature;\n"
+            "            float energy_error_2 = (energy_2_feature - energy_target_feature) / energy_target_feature;\n"
+            "            obs[0] = swing_gate;\n"
+            "            obs[1] = upright_gate;\n"
+            "            obs[2] = norm_x * swing_gate;\n"
+            "            obs[3] = norm_x_dot * swing_gate;\n"
+            "            obs[4] = norm_x * upright_gate;\n"
+            "            obs[5] = norm_x_dot * upright_gate;\n"
+            "            obs[6] = swing_gate * sin_feature_1;\n"
+            "            obs[7] = swing_gate * sin_feature_2;\n"
+            "            obs[8] = swing_gate * cos_feature_1;\n"
+            "            obs[9] = swing_gate * cos_feature_2;\n"
+            "            obs[10] = swing_gate * norm_theta_dot_1;\n"
+            "            obs[11] = swing_gate * norm_theta_dot_2;\n"
+            "            obs[12] = swing_gate * norm_theta_dot_1 * sin_feature_1;\n"
+            "            obs[13] = swing_gate * norm_theta_dot_2 * sin_feature_2;\n"
+            "            obs[14] = swing_gate * norm_theta_dot_1 * cos_feature_1;\n"
+            "            obs[15] = swing_gate * norm_theta_dot_2 * cos_feature_2;\n"
+            "            obs[16] = swing_gate * energy_error_1;\n"
+            "            obs[17] = swing_gate * energy_error_2;\n"
+            "            obs[18] = swing_gate * energy_error_1 * norm_theta_dot_1 * cos_feature_1;\n"
+            "            obs[19] = swing_gate * energy_error_2 * norm_theta_dot_2 * cos_feature_2;\n"
+            "            obs[20] = upright_gate * sin_feature_1;\n"
+            "            obs[21] = upright_gate * sin_feature_2;\n"
+            "            obs[22] = upright_gate * norm_theta_dot_1;\n"
+            "            obs[23] = upright_gate * norm_theta_dot_2;\n"
+            "            float force_logit = local_weights[FEATURE_COUNT];\n"
+            "            for (uint j = 0u; j < FEATURE_COUNT; ++j) force_logit += local_weights[j] * obs[j];\n"
+            "            float force = FORCE_MAG * tanh(force_logit);\n"
             "            float previous_cos_1 = cos(theta_1);\n"
             "            float previous_cos_2 = cos(theta_2);\n"
             "            float sin_1 = sin(theta_1);\n"
@@ -145,6 +177,10 @@ static NSString *kernelSource(void) {
             "            theta_dot_2 += DT * q_acc_2;\n"
             "            theta_1 = wrap_angle(theta_1 + DT * theta_dot_1);\n"
             "            theta_2 = wrap_angle(theta_2 + DT * theta_dot_2);\n"
+            "            if (abs(x) > 2.4f || !isfinite(x + x_dot + theta_1 + theta_2 + theta_dot_1 + theta_dot_2)) {\n"
+            "                score -= 1000.0f;\n"
+            "                break;\n"
+            "            }\n"
             "            float cos_1 = cos(theta_1);\n"
             "            float cos_2 = cos(theta_2);\n"
             "            float link_height_1 = 0.5f * (cos_1 + 1.0f);\n"
@@ -155,16 +191,29 @@ static NSString *kernelSource(void) {
             "            float top_speed = 0.5f * (link_height_1 * link_height_1 * abs(theta_dot_1)\n"
             "                + link_height_2 * link_height_2 * abs(theta_dot_2));\n"
             "            float controlled = chain_height * exp(-0.5f * (theta_dot_1 * theta_dot_1 + theta_dot_2 * theta_dot_2));\n"
+            "            float angle_precision = exp(-0.5f * ((theta_1 / 0.35f) * (theta_1 / 0.35f) + (theta_2 / 0.35f) * (theta_2 / 0.35f)));\n"
+            "            float top_hold = angle_precision * exp(-0.5f * (theta_dot_1 * theta_dot_1 + theta_dot_2 * theta_dot_2));\n"
             "            float progress = 0.5f * ((cos_1 - previous_cos_1) + (cos_2 - previous_cos_2));\n"
-            "            score += 8.0f * height_reward + 20.0f * controlled + 50.0f * progress - 0.20f * top_speed;\n"
-            "            if (abs(x) > 2.4f || !isfinite(x + x_dot + theta_1 + theta_2 + theta_dot_1 + theta_dot_2)) {\n"
-            "                score -= 150.0f;\n"
-            "                break;\n"
-            "            }\n"
+            "            float centered = 1.0f - clamp((x / X_THRESHOLD) * (x / X_THRESHOLD), 0.0f, 1.0f);\n"
+            "            float bottom_motion = (1.0f - height) * 0.5f * (tanh(abs(theta_dot_1) / 2.0f) + tanh(abs(theta_dot_2) / 2.0f));\n"
+            "            float bottom_quiet = (1.0f - height) * (1.0f - clamp(bottom_motion, 0.0f, 1.0f));\n"
+            "            float energy_target = 2.0f * GRAVITY * POLE_LENGTH;\n"
+            "            float energy_1 = 0.5f * (POLE_LENGTH * theta_dot_1) * (POLE_LENGTH * theta_dot_1) + GRAVITY * POLE_LENGTH * (cos_1 + 1.0f);\n"
+            "            float energy_2 = 0.5f * (POLE_LENGTH * theta_dot_2) * (POLE_LENGTH * theta_dot_2) + GRAVITY * POLE_LENGTH * (cos_2 + 1.0f);\n"
+            "            float energy_err_1 = (energy_1 - energy_target) / energy_target;\n"
+            "            float energy_err_2 = (energy_2 - energy_target) / energy_target;\n"
+            "            float energy_score = exp(-0.5f * (energy_err_1 * energy_err_1 + energy_err_2 * energy_err_2));\n"
+            "            float stable = (abs(x) <= 0.5f && abs(x_dot) <= 0.75f && abs(theta_1) <= 0.20943951f && abs(theta_2) <= 0.20943951f && abs(theta_dot_1) <= 1.0f && abs(theta_dot_2) <= 1.0f) ? 1.0f : 0.0f;\n"
+            "            float local_error = theta_1 * theta_1 + theta_2 * theta_2 + 0.2f * (theta_dot_1 * theta_dot_1 + theta_dot_2 * theta_dot_2) + 0.5f * (x / X_THRESHOLD) * (x / X_THRESHOLD) + 0.05f * x_dot * x_dot;\n"
+            "            float velocity_cost = 0.01f * x_dot * x_dot + 2.0f * (x / X_THRESHOLD) * (x / X_THRESHOLD) + 0.002f * 0.5f * (theta_dot_1 * theta_dot_1 + theta_dot_2 * theta_dot_2) + 0.25f * 0.5f * (link_height_1 * link_height_1 * theta_dot_1 * theta_dot_1 + link_height_2 * link_height_2 * theta_dot_2 * theta_dot_2);\n"
+            "            float action_cost = 0.01f * (force / FORCE_MAG) * (force / FORCE_MAG);\n"
+            "            score += 8.0f * height_reward + 100.0f * controlled + 200.0f * top_hold + upright_case * (50.0f - 80.0f * local_error) + 0.75f * energy_score + 60.0f * progress + 3.0f * bottom_motion + 0.1f * centered + 2000.0f * stable - 1.5f * bottom_quiet - velocity_cost - action_cost;\n"
             "        }\n"
             "    } else {\n"
             "        for (uint j = 0u; j < WEIGHT_COUNT; ++j) eps[j] = 0.0f;\n"
             "    }\n"
+            "    if (!isfinite(score)) score = -10000.0f;\n"
+            "    score = clamp(score, -10000.0f, 100000.0f);\n"
             "    for (uint j = 0u; j < WEIGHT_COUNT; ++j) scratch[j * THREADGROUP_SIZE + lid] = score * eps[j];\n"
             "    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
             "    for (uint stride = THREADGROUP_SIZE / 2u; stride > 0u; stride >>= 1u) {\n"
@@ -188,15 +237,22 @@ static NSString *kernelSource(void) {
             "    for (uint group = 0u; group < params.num_groups; ++group) {\n"
             "        total += partials[group * WEIGHT_COUNT + j];\n"
             "    }\n"
-            "    gradients[j] = total;\n"
+            "    gradients[j] = isfinite(total) ? total : 0.0f;\n"
             "}\n"
             "kernel void update_weights(device float *weights [[buffer(0)]],\n"
             "                           device float *gradients [[buffer(1)]],\n"
-            "                           constant TrainParams &params [[buffer(2)]],\n"
+            "                           device float *momentum [[buffer(2)]],\n"
+            "                           device float *variance [[buffer(3)]],\n"
+            "                           constant TrainParams &params [[buffer(4)]],\n"
             "                           uint j [[thread_position_in_grid]]) {\n"
             "    if (j >= WEIGHT_COUNT) return;\n"
-            "    float scale = params.learning_rate / (float(params.num_envs) * params.sigma);\n"
-            "    weights[j] += scale * gradients[j];\n"
+            "    float gradient = isfinite(gradients[j]) ? gradients[j] : 0.0f;\n"
+            "    gradient = gradient / (float(params.num_envs) * params.sigma);\n"
+            "    gradient = clamp(gradient, -200.0f, 200.0f);\n"
+            "    momentum[j] = 0.9f * momentum[j] + 0.1f * gradient;\n"
+            "    variance[j] = 0.99f * variance[j] + 0.01f * gradient * gradient;\n"
+            "    float update = momentum[j] / (sqrt(variance[j]) + 1.0e-3f);\n"
+            "    weights[j] = clamp(weights[j] + params.learning_rate * update, -20.0f, 20.0f);\n"
             "}\n";
 }
 
@@ -240,14 +296,24 @@ int main(int argc, const char *argv[]) {
         id<MTLBuffer> weights = [device newBufferWithLength:WEIGHT_COUNT * sizeof(float) options:MTLResourceStorageModeShared];
         id<MTLBuffer> partials = [device newBufferWithLength:(size_t)num_groups * WEIGHT_COUNT * sizeof(float) options:MTLResourceStorageModePrivate];
         id<MTLBuffer> gradients = [device newBufferWithLength:WEIGHT_COUNT * sizeof(float) options:MTLResourceStorageModePrivate];
-        if (weights == nil || partials == nil || gradients == nil) {
+        id<MTLBuffer> momentum = [device newBufferWithLength:WEIGHT_COUNT * sizeof(float) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> variance = [device newBufferWithLength:WEIGHT_COUNT * sizeof(float) options:MTLResourceStorageModeShared];
+        if (weights == nil || partials == nil || gradients == nil || momentum == nil || variance == nil) {
             fprintf(stderr, "buffer allocation failed\n");
             return 1;
         }
+        memset(momentum.contents, 0, WEIGHT_COUNT * sizeof(float));
+        memset(variance.contents, 0, WEIGHT_COUNT * sizeof(float));
         float *w = (float *)weights.contents;
         for (uint32_t i = 0; i < WEIGHT_COUNT; ++i) {
-            w[i] = ((float)((i * 17u) % 13u) - 6.0f) * 0.001f;
+            w[i] = 0.0f;
         }
+        w[4] = -0.378319f;
+        w[5] = -1.719792f;
+        w[20] = 8.887854f;
+        w[21] = -12.133175f;
+        w[22] = 3.222614f;
+        w[23] = -20.0f;
 
         id<MTLCommandQueue> queue = [device newCommandQueue];
         MTLSize env_threads = MTLSizeMake(num_envs, 1, 1);
@@ -290,7 +356,9 @@ int main(int argc, const char *argv[]) {
             [update_encoder setComputePipelineState:update];
             [update_encoder setBuffer:weights offset:0 atIndex:0];
             [update_encoder setBuffer:gradients offset:0 atIndex:1];
-            [update_encoder setBuffer:params_buffer offset:0 atIndex:2];
+            [update_encoder setBuffer:momentum offset:0 atIndex:2];
+            [update_encoder setBuffer:variance offset:0 atIndex:3];
+            [update_encoder setBuffer:params_buffer offset:0 atIndex:4];
             [update_encoder dispatchThreads:weight_threads threadsPerThreadgroup:weight_group];
             [update_encoder endEncoding];
 
@@ -299,8 +367,9 @@ int main(int argc, const char *argv[]) {
         }
         double elapsed = now_seconds() - start;
         double total_steps = (double)num_envs * (double)steps * (double)iterations;
+        double steps_per_second = elapsed > 0.0 ? total_steps / elapsed : 0.0;
         printf("metal_es_train steps=%.0f elapsed=%.6fs sps=%.0f weights_checksum=%.6f first_weight=%.6f\n",
-               total_steps, elapsed, total_steps / elapsed, w[0], w[0]);
+               total_steps, elapsed, steps_per_second, w[0], w[0]);
         if (output_path != NULL) {
             FILE *file = fopen(output_path, "wb");
             if (file == NULL) {
