@@ -8,9 +8,12 @@ import time
 from pathlib import Path
 
 import numpy as np
+import torch
 from PIL import Image, ImageDraw
 
 from cartpole_multi.env import MultiPendulumCartPoleEnv
+from cartpole_multi.env import CartPoleParams
+from cartpole_multi.torch_env import policy_observation_from_state
 
 
 def record_action_video(
@@ -35,6 +38,62 @@ def record_action_video(
 
     for action in actions[: args.video_steps]:
         _obs, _reward, terminated, truncated, _info = env.step(int(action))
+        frames.append(render_env_frame(env, width=args.video_width, height=args.video_height))
+        if terminated or truncated:
+            break
+
+    render_elapsed = max(time.perf_counter() - render_start, 1e-9)
+    print(
+        f"timing phase=video_render frames={len(frames)} "
+        f"elapsed={render_elapsed:.3f}s fps={len(frames) / render_elapsed:.0f}",
+        flush=True,
+    )
+    write_start = time.perf_counter()
+    write_video(frames, video_path, fps=args.video_fps)
+    write_elapsed = max(time.perf_counter() - write_start, 1e-9)
+    print(
+        f"timing phase=video_write frames={len(frames)} "
+        f"elapsed={write_elapsed:.3f}s fps={len(frames) / write_elapsed:.0f}",
+        flush=True,
+    )
+    return str(video_path)
+
+
+def record_policy_video(
+    policy: torch.nn.Module,
+    args: argparse.Namespace,
+    params: CartPoleParams,
+    device: torch.device,
+    suffix: str = "policy",
+) -> str:
+    video_dir = Path(args.video_dir)
+    video_dir.mkdir(parents=True, exist_ok=True)
+    video_path = video_dir / (
+        f"cartpole_{args.num_pendulums}p_{suffix}_seed{args.seed}.mp4"
+    )
+
+    env = MultiPendulumCartPoleEnv(
+        num_pendulums=args.num_pendulums,
+        params=params,
+        reset_mode=args.eval_reset_mode,
+        seed=args.seed,
+    )
+    _obs, _info = env.reset()
+    policy.eval()
+    render_start = time.perf_counter()
+    frames = [render_env_frame(env, width=args.video_width, height=args.video_height)]
+
+    for _step in range(args.video_steps):
+        raw_state = torch.as_tensor(
+            env.state,
+            dtype=torch.float32,
+            device=device,
+        ).unsqueeze(0)
+        obs = policy_observation_from_state(raw_state, args.num_pendulums, params)
+        with torch.no_grad():
+            logits, _value = policy.forward_eval(obs)
+            action = int(torch.argmax(logits, dim=1).item())
+        _obs, _reward, terminated, truncated, _info = env.step(action)
         frames.append(render_env_frame(env, width=args.video_width, height=args.video_height))
         if terminated or truncated:
             break

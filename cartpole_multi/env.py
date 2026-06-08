@@ -26,15 +26,19 @@ class CartPoleParams:
     stable_theta_threshold: float = np.deg2rad(12.0)
     stable_theta_dot_threshold: float = 1.0
     max_episode_steps: int = 500
-    upright_reward_weight: float = 2.0
-    centered_reward_weight: float = 0.05
+    upright_reward_weight: float = 8.0
+    centered_reward_weight: float = 0.10
     energy_reward_weight: float = 0.75
+    swingup_progress_reward_weight: float = 50.0
+    swingup_motion_reward_weight: float = 0.05
     x_velocity_cost_weight: float = 0.01
+    x_position_cost_weight: float = 2.0
     theta_velocity_cost_weight: float = 0.002
-    action_cost_weight: float = 0.0005
-    alive_reward: float = 0.7
-    stable_bonus: float = 5.0
-    termination_penalty: float = 25.0
+    top_theta_velocity_cost_weight: float = 0.20
+    action_cost_weight: float = 0.01
+    alive_reward: float = 0.0
+    stable_bonus: float = 20.0
+    termination_penalty: float = 150.0
 
 
 class MultiPendulumCartPoleEnv(gym.Env):
@@ -100,7 +104,8 @@ class MultiPendulumCartPoleEnv(gym.Env):
         force = (action - 1) * p.force_mag
         x = float(self.state[0])
         x_dot = float(self.state[1])
-        theta = self.state[2 : 2 + self.num_pendulums].astype(np.float64)
+        previous_theta = self.state[2 : 2 + self.num_pendulums].astype(np.float64)
+        theta = previous_theta.copy()
         theta_dot = self.state[2 + self.num_pendulums :].astype(np.float64)
 
         q_dot = np.concatenate(([x_dot], theta_dot))
@@ -126,7 +131,7 @@ class MultiPendulumCartPoleEnv(gym.Env):
             or not np.all(np.isfinite(self.state))
         )
         truncated = self.step_count >= p.max_episode_steps
-        reward = self._reward(force, terminated)
+        reward = self._reward(force, terminated, previous_theta)
 
         info = {
             "x": x,
@@ -201,27 +206,42 @@ class MultiPendulumCartPoleEnv(gym.Env):
 
         return mass_dot_q_dot - kinetic_gradient + potential_gradient + damping
 
-    def _reward(self, force: float, terminated: bool) -> float:
+    def _reward(
+        self,
+        force: float,
+        terminated: bool,
+        previous_theta: np.ndarray,
+    ) -> float:
         p = self.params
         x = float(self.state[0])
         x_dot = float(self.state[1])
         theta = self.state[2 : 2 + self.num_pendulums]
         theta_dot = self.state[2 + self.num_pendulums :]
 
-        upright = float(np.mean(np.cos(theta)))
+        link_height = (np.cos(theta) + 1.0) * 0.5
+        height = float(np.mean(link_height))
+        chain_height = float(np.exp(np.mean(np.log(np.clip(link_height, 1e-4, 1.0)))))
+        height_reward = 0.5 * height + 0.5 * chain_height
+        height_progress = float(np.mean(np.cos(theta) - np.cos(previous_theta)))
+        low_motion = (1.0 - height) * height * float(np.mean(np.tanh(np.abs(theta_dot) / 2.0)))
         centered = 1.0 - min((x / p.x_threshold) ** 2, 1.0)
         velocity_cost = (
-            p.x_velocity_cost_weight * x_dot**2
+            p.x_position_cost_weight * (x / p.x_threshold) ** 2
+            + p.x_velocity_cost_weight * x_dot**2
             + p.theta_velocity_cost_weight * float(np.mean(theta_dot**2))
+            + p.top_theta_velocity_cost_weight
+            * float(np.mean((link_height**2) * (theta_dot**2)))
         )
         action_cost = p.action_cost_weight * (force / p.force_mag) ** 2
         stable = self.is_stable()
         energy_score = self._energy_score(theta, theta_dot)
         reward = (
             p.alive_reward
-            + p.upright_reward_weight * ((upright + 1.0) * 0.5)
+            + p.upright_reward_weight * height_reward
             + p.centered_reward_weight * centered
             + p.energy_reward_weight * energy_score
+            + p.swingup_progress_reward_weight * height_progress
+            + p.swingup_motion_reward_weight * low_motion
             - velocity_cost
             - action_cost
         )
@@ -307,7 +327,9 @@ class MultiPendulumCartPoleEnv(gym.Env):
             + p.gravity * p.pole_length * (np.cos(theta) + 1.0)
         )
         normalized_error = (link_energy - target_energy) / target_energy
-        return -float(np.mean(normalized_error**2))
+        bottom_score = np.exp(-1.0)
+        raw_score = np.exp(-np.mean(normalized_error**2))
+        return float((raw_score - bottom_score) / (1.0 - bottom_score))
 
     def is_stable(self) -> bool:
         p = self.params

@@ -7,6 +7,7 @@ dependencies = [
     "gymnasium>=0.29",
     "numpy>=1.24",
     "pillow>=8.3",
+    "pufferlib>=3.0",
     "torch>=2.0",
 ]
 
