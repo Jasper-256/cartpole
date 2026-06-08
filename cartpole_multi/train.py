@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import re
+import subprocess
+import tempfile
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -54,6 +57,12 @@ def train(args: argparse.Namespace) -> TrainResult:
         )
     torch.set_float32_matmul_precision("high")
     torch.manual_seed(args.seed)
+    if args.backend == "metal-es":
+        if device.type != "mps":
+            raise RuntimeError("backend=metal-es requires Apple Metal/MPS")
+        return train_metal_es(args, params, device)
+    if args.backend != "ppo":
+        raise ValueError(f"unknown backend {args.backend}")
 
     env = TorchMultiPendulumCartPoleEnv(
         num_envs=args.num_envs,
@@ -62,6 +71,7 @@ def train(args: argparse.Namespace) -> TrainResult:
         reset_mode=args.reset_mode,
         device=device,
         seed=args.seed,
+        autoreset=args.autoreset,
     )
     policy = CartPolePolicy(
         observation_size=observation_dim(args.num_pendulums),
@@ -233,7 +243,9 @@ def train(args: argparse.Namespace) -> TrainResult:
     if best_state is not None:
         policy.load_state_dict(best_state)
 
-    checkpoint_path = save_checkpoint(policy, args, params, total_timesteps)
+    checkpoint_path = ""
+    if args.checkpoint:
+        checkpoint_path = save_checkpoint(policy, args, params, total_timesteps)
     eval_stats = evaluate_policy(policy, args, params, device)
 
     video_path = None
@@ -269,6 +281,157 @@ def train(args: argparse.Namespace) -> TrainResult:
         checkpoint_path=checkpoint_path,
         video_path=video_path,
     )
+
+
+def train_metal_es(
+    args: argparse.Namespace,
+    params: CartPoleParams,
+    device: torch.device,
+) -> TrainResult:
+    if args.num_pendulums != 2:
+        raise RuntimeError("backend=metal-es currently supports --num-pendulums 2")
+
+    binary = ensure_metal_es_binary()
+    with tempfile.NamedTemporaryFile(prefix="cartpole_metal_weights_", suffix=".bin") as weights_file:
+        cmd = [
+            str(binary),
+            str(args.metal_envs),
+            str(args.metal_rollout_steps),
+            str(args.metal_iterations),
+            str(args.metal_sigma),
+            str(args.metal_learning_rate),
+            weights_file.name,
+        ]
+        print(
+            "train_start "
+            f"backend=metal-es "
+            f"device={device.type} "
+            f"pendulums={args.num_pendulums} "
+            f"num_envs={args.metal_envs} "
+            f"rollout_steps={args.metal_rollout_steps} "
+            f"updates={args.metal_iterations} "
+            f"optimizer=es",
+            flush=True,
+        )
+        process = subprocess.run(
+            cmd,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        if process.stderr:
+            print(process.stderr, end="", flush=True)
+        print(process.stdout, end="", flush=True)
+        stats = parse_metal_es_stdout(process.stdout)
+        weights = np.fromfile(weights_file.name, dtype=np.float32)
+
+    if weights.shape != (27,):
+        raise RuntimeError(f"metal-es wrote {weights.shape[0]} weights, expected 27")
+
+    policy = CartPolePolicy(
+        observation_size=observation_dim(args.num_pendulums),
+        action_size=3,
+        hidden_size=0,
+    ).to(device)
+    load_metal_actor_weights(policy, weights, device)
+
+    checkpoint_path = ""
+    if args.checkpoint:
+        checkpoint_path = save_checkpoint(policy, args, params, int(stats["steps"]))
+    eval_stats = evaluate_policy(policy, args, params, device)
+
+    video_path = None
+    if args.video:
+        video_start = time.perf_counter()
+        video_path = record_policy_video(policy, args, params, device, suffix="metal_es")
+        print(
+            f"timing phase=video_total elapsed={time.perf_counter() - video_start:.3f}s",
+            flush=True,
+        )
+        print(f"saved_video={video_path}", flush=True)
+        if args.open_video:
+            open_video(video_path)
+
+    return TrainResult(
+        num_pendulums=args.num_pendulums,
+        total_timesteps=int(stats["steps"]),
+        updates=args.metal_iterations,
+        steps_per_second=stats["sps"],
+        last_mean_reward=0.0,
+        last_mean_length=0.0,
+        stable_timesteps=0,
+        stable_rate=0.0,
+        rollout_controlled_upright=0.0,
+        eval_mean_reward=eval_stats["mean_reward"],
+        eval_mean_length=eval_stats["mean_length"],
+        eval_mean_height=eval_stats["mean_height"],
+        eval_controlled_upright=eval_stats["mean_controlled_upright"],
+        eval_top_theta_speed=eval_stats["mean_top_theta_speed"],
+        eval_stable_timesteps=int(eval_stats["stable_timesteps"]),
+        eval_stable_rate=eval_stats["stable_rate"],
+        checkpoint_path=checkpoint_path,
+        video_path=video_path,
+    )
+
+
+def ensure_metal_es_binary() -> Path:
+    root = Path(__file__).resolve().parents[1]
+    source = root / "benchmarks" / "metal_es_train.m"
+    binary = root / "benchmarks" / "metal_es_train"
+    if not source.exists():
+        raise RuntimeError(f"missing Metal ES source: {source}")
+    needs_compile = (
+        not binary.exists()
+        or source.stat().st_mtime_ns > binary.stat().st_mtime_ns
+    )
+    if needs_compile:
+        subprocess.run(
+            [
+                "xcrun",
+                "clang",
+                "-fobjc-arc",
+                "-framework",
+                "Foundation",
+                "-framework",
+                "Metal",
+                str(source),
+                "-o",
+                str(binary),
+            ],
+            check=True,
+        )
+    return binary
+
+
+def parse_metal_es_stdout(stdout: str) -> dict[str, float]:
+    match = re.search(
+        r"metal_es_train steps=([0-9]+) elapsed=([0-9.]+)s sps=([0-9.]+)",
+        stdout,
+    )
+    if match is None:
+        raise RuntimeError(f"could not parse metal-es output: {stdout!r}")
+    return {
+        "steps": float(match.group(1)),
+        "elapsed": float(match.group(2)),
+        "sps": float(match.group(3)),
+    }
+
+
+def load_metal_actor_weights(
+    policy: CartPolePolicy,
+    weights: np.ndarray,
+    device: torch.device,
+) -> None:
+    actor = weights.reshape(3, 9)
+    with torch.no_grad():
+        policy.actor.weight.copy_(
+            torch.as_tensor(actor[:, :8], dtype=torch.float32, device=device)
+        )
+        policy.actor.bias.copy_(
+            torch.as_tensor(actor[:, 8], dtype=torch.float32, device=device)
+        )
+        policy.value_fn.weight.zero_()
+        policy.value_fn.bias.zero_()
 
 
 def rollout(
@@ -576,8 +739,9 @@ def save_checkpoint(
 ) -> str:
     checkpoint_dir = Path(args.checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    backend = getattr(args, "backend", "ppo").replace("-", "_")
     checkpoint_path = checkpoint_dir / (
-        f"cartpole_{args.num_pendulums}p_ppo_seed{args.seed}.pt"
+        f"cartpole_{args.num_pendulums}p_{backend}_seed{args.seed}.pt"
     )
     torch.save(
         {
@@ -610,11 +774,13 @@ def params_from_args(args: argparse.Namespace) -> CartPoleParams:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--backend", choices=["metal-es", "ppo"], default="metal-es")
     parser.add_argument("--num-pendulums", type=int, default=NUM_PENDULUMS)
     parser.add_argument("--num-envs", type=int, default=4096)
     parser.add_argument("--eval-num-envs", type=int, default=1024)
     parser.add_argument("--reset-mode", choices=RESET_MODES, default="downward")
     parser.add_argument("--eval-reset-mode", choices=RESET_MODES, default="downward")
+    parser.add_argument("--autoreset", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument(
         "--device",
@@ -642,6 +808,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--anneal-lr", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--compile-mode", default="max-autotune-no-cudagraphs")
+    parser.add_argument("--metal-envs", type=int, default=3_145_728)
+    parser.add_argument("--metal-rollout-steps", type=int, default=500)
+    parser.add_argument("--metal-iterations", type=int, default=1)
+    parser.add_argument("--metal-sigma", type=float, default=0.05)
+    parser.add_argument("--metal-learning-rate", type=float, default=0.02)
 
     parser.add_argument("--log-every", type=int, default=0)
     parser.add_argument("--eval-steps", type=int, default=500)
@@ -655,6 +826,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stable-theta-dot-threshold", type=float, default=1.0)
 
     parser.add_argument("--checkpoint-dir", default="checkpoints")
+    parser.add_argument("--checkpoint", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--video", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--open-video", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--video-dir", default="videos")

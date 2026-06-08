@@ -70,6 +70,7 @@ class TorchMultiPendulumCartPoleEnv:
         reset_mode: str = "mixed",
         device: torch.device | str = "cpu",
         seed: int | None = None,
+        autoreset: bool = True,
     ) -> None:
         if num_envs < 1:
             raise ValueError("num_envs must be at least 1")
@@ -82,6 +83,7 @@ class TorchMultiPendulumCartPoleEnv:
         self.num_pendulums = int(num_pendulums)
         self.params = params or CartPoleParams()
         self.reset_mode = reset_mode
+        self.autoreset = bool(autoreset)
         self.device = torch.device(device)
         self.dtype = torch.float32
         self.raw_state_dim = 2 + 2 * self.num_pendulums
@@ -135,6 +137,11 @@ class TorchMultiPendulumCartPoleEnv:
 
     @torch.no_grad()
     def step(self, action: torch.Tensor) -> TorchStep:
+        if self.num_pendulums == 2:
+            return self._step_two_pendulums(action)
+        return self._step_generic(action)
+
+    def _step_generic(self, action: torch.Tensor) -> TorchStep:
         action = action.to(device=self.device, dtype=self.dtype).view(self.num_envs)
         p = self.params
         n = self.num_pendulums
@@ -180,25 +187,26 @@ class TorchMultiPendulumCartPoleEnv:
             torch.zeros_like(self.episode_stable_steps),
         )
 
-        reset_state = self._sample_reset_state(self.num_envs)
-        done_f = done[:, None]
-        self.state = torch.where(done_f, reset_state, self.state)
-        self.step_count = torch.where(done, torch.zeros_like(self.step_count), self.step_count)
-        self.episode_return = torch.where(
-            done,
-            torch.zeros_like(self.episode_return),
-            self.episode_return,
-        )
-        self.episode_length = torch.where(
-            done,
-            torch.zeros_like(self.episode_length),
-            self.episode_length,
-        )
-        self.episode_stable_steps = torch.where(
-            done,
-            torch.zeros_like(self.episode_stable_steps),
-            self.episode_stable_steps,
-        )
+        if self.autoreset:
+            reset_state = self._sample_reset_state(self.num_envs)
+            done_f = done[:, None]
+            self.state = torch.where(done_f, reset_state, self.state)
+            self.step_count = torch.where(done, torch.zeros_like(self.step_count), self.step_count)
+            self.episode_return = torch.where(
+                done,
+                torch.zeros_like(self.episode_return),
+                self.episode_return,
+            )
+            self.episode_length = torch.where(
+                done,
+                torch.zeros_like(self.episode_length),
+                self.episode_length,
+            )
+            self.episode_stable_steps = torch.where(
+                done,
+                torch.zeros_like(self.episode_stable_steps),
+                self.episode_stable_steps,
+            )
 
         link_height = (torch.cos(theta) + 1.0) * 0.5
         chain_height = torch.exp(
@@ -226,6 +234,244 @@ class TorchMultiPendulumCartPoleEnv:
                     link_height.square() * theta_dot.abs(),
                     dim=1,
                 ),
+            },
+        )
+
+    def _step_two_pendulums(self, action: torch.Tensor) -> TorchStep:
+        action = action.to(device=self.device, dtype=self.dtype).view(self.num_envs)
+        p = self.params
+        state = self.state
+
+        force = (action - 1.0) * p.force_mag
+        x = state[:, 0]
+        x_dot = state[:, 1]
+        theta_1 = state[:, 2]
+        theta_2 = state[:, 3]
+        theta_dot_1 = state[:, 4]
+        theta_dot_2 = state[:, 5]
+
+        previous_cos_1 = torch.cos(theta_1)
+        previous_cos_2 = torch.cos(theta_2)
+        sin_1 = torch.sin(theta_1)
+        sin_2 = torch.sin(theta_2)
+        delta = theta_1 - theta_2
+        sin_delta = torch.sin(delta)
+        cos_delta = torch.cos(delta)
+
+        pole_mass_length = p.pole_mass * p.pole_length
+        pole_inertia = p.pole_mass * p.pole_length**2
+        matrix_00 = p.cart_mass + 2.0 * p.pole_mass
+        matrix_01 = 2.0 * pole_mass_length * previous_cos_1
+        matrix_02 = pole_mass_length * previous_cos_2
+        matrix_11 = 2.0 * pole_inertia
+        matrix_12 = pole_inertia * cos_delta
+        matrix_22 = pole_inertia
+
+        theta_dot_1_sq = theta_dot_1.square()
+        theta_dot_2_sq = theta_dot_2.square()
+        bias_0 = (
+            -2.0 * pole_mass_length * sin_1 * theta_dot_1_sq
+            - pole_mass_length * sin_2 * theta_dot_2_sq
+            + p.cart_friction * x_dot
+        )
+        bias_1 = (
+            pole_inertia * sin_delta * theta_dot_2_sq
+            - 2.0 * pole_mass_length * p.gravity * sin_1
+            + p.pole_friction * theta_dot_1
+        )
+        bias_2 = (
+            -pole_inertia * sin_delta * theta_dot_1_sq
+            - pole_mass_length * p.gravity * sin_2
+            + p.pole_friction * theta_dot_2
+        )
+
+        rhs_0 = force - bias_0
+        rhs_1 = -bias_1
+        rhs_2 = -bias_2
+
+        cofactor_00 = matrix_11 * matrix_22 - matrix_12.square()
+        cofactor_01 = matrix_02 * matrix_12 - matrix_01 * matrix_22
+        cofactor_02 = matrix_01 * matrix_12 - matrix_02 * matrix_11
+        cofactor_11 = matrix_00 * matrix_22 - matrix_02.square()
+        cofactor_12 = matrix_01 * matrix_02 - matrix_00 * matrix_12
+        cofactor_22 = matrix_00 * matrix_11 - matrix_01.square()
+        determinant = (
+            matrix_00 * cofactor_00
+            + matrix_01 * cofactor_01
+            + matrix_02 * cofactor_02
+        )
+
+        q_acc_0 = (
+            cofactor_00 * rhs_0
+            + cofactor_01 * rhs_1
+            + cofactor_02 * rhs_2
+        ) / determinant
+        q_acc_1 = (
+            cofactor_01 * rhs_0
+            + cofactor_11 * rhs_1
+            + cofactor_12 * rhs_2
+        ) / determinant
+        q_acc_2 = (
+            cofactor_02 * rhs_0
+            + cofactor_12 * rhs_1
+            + cofactor_22 * rhs_2
+        ) / determinant
+
+        x_dot = x_dot + p.dt * q_acc_0
+        x = x + p.dt * x_dot
+        theta_dot_1 = theta_dot_1 + p.dt * q_acc_1
+        theta_dot_2 = theta_dot_2 + p.dt * q_acc_2
+        theta_1 = self._wrap_angles(theta_1 + p.dt * theta_dot_1)
+        theta_2 = self._wrap_angles(theta_2 + p.dt * theta_dot_2)
+
+        finite = (
+            torch.isfinite(x)
+            & torch.isfinite(x_dot)
+            & torch.isfinite(theta_1)
+            & torch.isfinite(theta_2)
+            & torch.isfinite(theta_dot_1)
+            & torch.isfinite(theta_dot_2)
+        )
+        terminated = (x.abs() > p.x_threshold) | ~finite
+        truncated = self.step_count + 1 >= p.max_episode_steps
+
+        theta_1_abs = theta_1.abs()
+        theta_2_abs = theta_2.abs()
+        theta_dot_1_abs = theta_dot_1.abs()
+        theta_dot_2_abs = theta_dot_2.abs()
+        stable = (
+            (x.abs() <= p.stable_x_threshold)
+            & (x_dot.abs() <= p.stable_x_dot_threshold)
+            & (theta_1_abs <= p.stable_theta_threshold)
+            & (theta_2_abs <= p.stable_theta_threshold)
+            & (theta_dot_1_abs <= p.stable_theta_dot_threshold)
+            & (theta_dot_2_abs <= p.stable_theta_dot_threshold)
+        )
+
+        cos_1 = torch.cos(theta_1)
+        cos_2 = torch.cos(theta_2)
+        link_height_1 = (cos_1 + 1.0) * 0.5
+        link_height_2 = (cos_2 + 1.0) * 0.5
+        height = 0.5 * (link_height_1 + link_height_2)
+        chain_height = torch.sqrt(
+            torch.clamp(link_height_1, min=1e-4, max=1.0)
+            * torch.clamp(link_height_2, min=1e-4, max=1.0)
+        )
+        height_reward = 0.5 * height + 0.5 * chain_height
+        height_progress = 0.5 * (
+            (cos_1 - previous_cos_1)
+            + (cos_2 - previous_cos_2)
+        )
+        low_motion = (
+            (1.0 - height)
+            * height
+            * 0.5
+            * (
+                torch.tanh(theta_dot_1_abs / 2.0)
+                + torch.tanh(theta_dot_2_abs / 2.0)
+            )
+        )
+        centered = 1.0 - torch.clamp((x / p.x_threshold).square(), 0.0, 1.0)
+        top_theta_speed = 0.5 * (
+            link_height_1.square() * theta_dot_1_abs
+            + link_height_2.square() * theta_dot_2_abs
+        )
+        theta_velocity_mean = 0.5 * (theta_dot_1.square() + theta_dot_2.square())
+        velocity_cost = (
+            p.x_position_cost_weight * (x / p.x_threshold).square()
+            + p.x_velocity_cost_weight * x_dot.square()
+            + p.theta_velocity_cost_weight * theta_velocity_mean
+            + p.top_theta_velocity_cost_weight
+            * 0.5
+            * (
+                link_height_1.square() * theta_dot_1.square()
+                + link_height_2.square() * theta_dot_2.square()
+            )
+        )
+        action_cost = p.action_cost_weight * (force / p.force_mag).square()
+        energy_score = self._energy_score_two(
+            cos_1,
+            cos_2,
+            theta_dot_1,
+            theta_dot_2,
+        )
+        reward = (
+            p.alive_reward
+            + p.upright_reward_weight * height_reward
+            + p.centered_reward_weight * centered
+            + p.energy_reward_weight * energy_score
+            + p.swingup_progress_reward_weight * height_progress
+            + p.swingup_motion_reward_weight * low_motion
+            - velocity_cost
+            - action_cost
+        )
+        reward = reward + p.stable_bonus * stable.to(self.dtype)
+        reward = torch.where(terminated, reward - p.termination_penalty, reward)
+        done = terminated | truncated
+
+        state[:, 0] = x
+        state[:, 1] = x_dot
+        state[:, 2] = theta_1
+        state[:, 3] = theta_2
+        state[:, 4] = theta_dot_1
+        state[:, 5] = theta_dot_2
+        self.step_count += 1
+        self.episode_return += reward
+        self.episode_length += 1
+        self.episode_stable_steps += stable.to(torch.int32)
+
+        completed_return = torch.where(done, self.episode_return, torch.zeros_like(reward))
+        completed_length = torch.where(done, self.episode_length, torch.zeros_like(self.step_count))
+        completed_stable = torch.where(
+            done,
+            self.episode_stable_steps,
+            torch.zeros_like(self.episode_stable_steps),
+        )
+
+        if self.autoreset:
+            reset_state = self._sample_reset_state(self.num_envs)
+            done_f = done[:, None]
+            self.state = torch.where(done_f, reset_state, self.state)
+            self.step_count = torch.where(done, torch.zeros_like(self.step_count), self.step_count)
+            self.episode_return = torch.where(
+                done,
+                torch.zeros_like(self.episode_return),
+                self.episode_return,
+            )
+            self.episode_length = torch.where(
+                done,
+                torch.zeros_like(self.episode_length),
+                self.episode_length,
+            )
+            self.episode_stable_steps = torch.where(
+                done,
+                torch.zeros_like(self.episode_stable_steps),
+                self.episode_stable_steps,
+            )
+
+        controlled_upright = chain_height * torch.exp(
+            -0.5
+            * (
+                (theta_dot_1 / p.stable_theta_dot_threshold).square()
+                + (theta_dot_2 / p.stable_theta_dot_threshold).square()
+            )
+        )
+        return TorchStep(
+            observation=self.observation(),
+            reward=reward,
+            terminated=terminated,
+            truncated=truncated,
+            info={
+                "done": done,
+                "stable": stable,
+                "episode_return": completed_return,
+                "episode_length": completed_length.to(self.dtype),
+                "episode_stable_steps": completed_stable.to(self.dtype),
+                "x": x,
+                "upright": 0.5 * (cos_1 + cos_2),
+                "height": height,
+                "controlled_upright": controlled_upright,
+                "top_theta_speed": top_theta_speed,
             },
         )
 
@@ -442,6 +688,31 @@ class TorchMultiPendulumCartPoleEnv:
         normalized_error = (link_energy - target_energy) / target_energy
         bottom_score = np.exp(-1.0)
         raw_score = torch.exp(-torch.mean(normalized_error.square(), dim=1))
+        return (raw_score - bottom_score) / (1.0 - bottom_score)
+
+    def _energy_score_two(
+        self,
+        cos_1: torch.Tensor,
+        cos_2: torch.Tensor,
+        theta_dot_1: torch.Tensor,
+        theta_dot_2: torch.Tensor,
+    ) -> torch.Tensor:
+        p = self.params
+        target_energy = 2.0 * p.gravity * p.pole_length
+        velocity_scale = 0.5 * p.pole_length**2
+        potential_scale = p.gravity * p.pole_length
+        error_1 = (
+            velocity_scale * theta_dot_1.square()
+            + potential_scale * (cos_1 + 1.0)
+            - target_energy
+        ) / target_energy
+        error_2 = (
+            velocity_scale * theta_dot_2.square()
+            + potential_scale * (cos_2 + 1.0)
+            - target_energy
+        ) / target_energy
+        bottom_score = np.exp(-1.0)
+        raw_score = torch.exp(-0.5 * (error_1.square() + error_2.square()))
         return (raw_score - bottom_score) / (1.0 - bottom_score)
 
     def _is_stable_state(self, state: torch.Tensor) -> torch.Tensor:

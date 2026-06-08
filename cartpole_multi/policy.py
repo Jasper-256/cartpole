@@ -19,17 +19,22 @@ class CartPolePolicy(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = int(hidden_size)
-        self.encoder = nn.Sequential(
-            pufferlib.pytorch.layer_init(nn.Linear(observation_size, hidden_size)),
-            nn.GELU(),
-            pufferlib.pytorch.layer_init(nn.Linear(hidden_size, hidden_size)),
-            nn.GELU(),
-        )
+        if self.hidden_size > 0:
+            self.encoder = nn.Sequential(
+                pufferlib.pytorch.layer_init(nn.Linear(observation_size, hidden_size)),
+                nn.GELU(),
+                pufferlib.pytorch.layer_init(nn.Linear(hidden_size, hidden_size)),
+                nn.GELU(),
+            )
+            actor_input_size = hidden_size
+        else:
+            self.encoder = nn.Identity()
+            actor_input_size = observation_size
         self.actor = pufferlib.pytorch.layer_init(
-            nn.Linear(hidden_size, action_size),
+            nn.Linear(actor_input_size, action_size),
             std=0.01,
         )
-        self.value_fn = pufferlib.pytorch.layer_init(nn.Linear(hidden_size, 1), std=1.0)
+        self.value_fn = pufferlib.pytorch.layer_init(nn.Linear(actor_input_size, 1), std=1.0)
 
     def encode_observations(
         self,
@@ -37,7 +42,7 @@ class CartPolePolicy(nn.Module):
         state: dict | None = None,
     ) -> torch.Tensor:
         del state
-        return self.encoder(observations.float())
+        return self.encoder(observations)
 
     def decode_actions(self, hidden: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         return self.actor(hidden), self.value_fn(hidden)
