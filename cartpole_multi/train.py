@@ -54,26 +54,16 @@ def train(args: argparse.Namespace) -> TrainResult:
         )
     if device.type != "mps":
         raise RuntimeError("The native Metal ES trainer requires Apple Metal/MPS")
-    if args.num_pendulums != 2:
-        raise RuntimeError("The native Metal ES trainer currently supports --num-pendulums 2")
 
     torch.set_float32_matmul_precision("high")
     torch.manual_seed(args.seed)
 
-    binary = ensure_metal_es_binary()
+    binary = ensure_metal_es_binary(args.num_pendulums)
     with tempfile.NamedTemporaryFile(
         prefix="cartpole_metal_weights_",
         suffix=".bin",
     ) as weights_file:
-        cmd = [
-            str(binary),
-            str(args.num_envs),
-            str(args.rollout_steps),
-            str(args.updates),
-            str(args.sigma),
-            str(args.learning_rate),
-            weights_file.name,
-        ]
+        cmd = metal_es_command(binary, args, weights_file.name)
         print(
             "train_start "
             "backend=metal-es "
@@ -144,10 +134,35 @@ def train(args: argparse.Namespace) -> TrainResult:
     )
 
 
-def ensure_metal_es_binary() -> Path:
+def metal_es_command(binary: Path, args: argparse.Namespace, weights_path: str) -> list[str]:
+    if args.num_pendulums == 2:
+        return [
+            str(binary),
+            str(args.num_envs),
+            str(args.rollout_steps),
+            str(args.updates),
+            str(args.sigma),
+            str(args.learning_rate),
+            weights_path,
+        ]
+    return [
+        str(binary),
+        str(args.num_pendulums),
+        str(args.num_envs),
+        str(args.rollout_steps),
+        str(args.updates),
+        str(args.sigma),
+        str(args.learning_rate),
+        weights_path,
+    ]
+
+
+def ensure_metal_es_binary(num_pendulums: int) -> Path:
     root = Path(__file__).resolve().parents[1]
-    source = root / "benchmarks" / "metal_es_train.m"
-    binary = root / "benchmarks" / "metal_es_train"
+    source_name = "metal_es_train_2p.m" if num_pendulums == 2 else "metal_es_train.m"
+    binary_name = "metal_es_train_2p" if num_pendulums == 2 else "metal_es_train"
+    source = root / "benchmarks" / source_name
+    binary = root / "benchmarks" / binary_name
     if not source.exists():
         raise RuntimeError(f"missing Metal ES source: {source}")
     needs_compile = (
@@ -175,7 +190,7 @@ def ensure_metal_es_binary() -> Path:
 
 def parse_metal_es_stdout(stdout: str) -> dict[str, float]:
     match = re.search(
-        r"metal_es_train steps=([0-9]+) elapsed=([0-9.]+)s sps=([0-9.]+)",
+        r"metal_es_train .*steps=([0-9]+) elapsed=([0-9.]+)s sps=([0-9.]+)",
         stdout,
     )
     if match is None:

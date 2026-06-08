@@ -9,6 +9,10 @@ scoring, gradient reduction, and weight updates stay in Metal during training.
 Python only compiles/launches the Metal helper, saves the learned linear policy,
 runs a GPU evaluation pass, and renders the final video.
 
+`--num-pendulums 2` uses the tuned closed-form Metal helper. Other positive
+pendulum counts use the same ES/checkpoint/eval/video pipeline through the
+generic serial-chain Metal helper.
+
 The default run trains `16,515,072,000` simulator steps:
 
 ```bash
@@ -33,6 +37,7 @@ python -m pip install -e .
 ## Main Knobs
 
 - `--num-envs`: ES population size. Defaults to `2359296`.
+- `--num-pendulums`: serial chain length. Defaults to `2`.
 - `--rollout-steps`: rollout horizon per ES sample. Defaults to `500`.
 - `--updates`: ES weight update count. Defaults to `14`.
 - `--sigma`: perturbation scale. Defaults to `0.25`.

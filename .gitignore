@@ -8,3 +8,4 @@ __pycache__
 /videos/
 /checkpoints/
 /benchmarks/metal_es_train
+/benchmarks/metal_es_train_2p
